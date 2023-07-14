@@ -1,0 +1,2769 @@
+---
+title: "mungbeanAVRDC"
+output: pdf_document
+date: "2023-03-06"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,eval=FALSE)
+library(sommer)
+library(lme4)
+library(dplyr)
+library(rrBLUP)
+library(BGLR)
+library(readxl)
+library(ggplot2)
+library(ggridges)
+library(tidyverse)
+library(corrplot)
+library(vcfR)
+options(scipen = 100,digits=3)
+```
+
+```{r, echo=FALSE}
+# Read in data files
+WorkDir <- "C:/Users/natha/OneDrive/Desktop/UH_Manoa/PhD/SideProjects/WorldVeg/MungBean"
+setwd(WorkDir)
+dataManPheno <- read_xlsx("miniCore/mungbeanData.xlsx",sheet="dataManPheno") #read in manually collected phenotypes
+dataSoil <- read_xlsx("miniCore/mungbeanData.xlsx",sheet="dataSoil") #read in soil sample data
+dataHTPheno <- read_xlsx("miniCore/mungbeanData.xlsx",sheet="dataHTPheno") #read in high-throughput phenomics data
+vcf <- read.vcfR("miniCore/MMC_MAF005.vcf.gz", verbose = FALSE) # vcf of genomics (SNP) dataset
+```
+
+# Data Organization
+Data to the correct format and type. Correct column variable names to the same across datafiles. Use the function $str(dataObject)$ to ensure the column class is the following: defining columns (genotype name, block, location, etc) should be class *chr* or *Factor*, observations (phenotypes, etc) should be class *dbl* or *num*. Examples are below: 
+```{r, results='hide'}
+# Check data type - all data should be num/dbl, id information (block, genotype, etc) should be Factor/chr
+str(dataHTPheno) 
+str(dataManPheno)
+str(dataSoil)
+```
+
+If you need to change something to factor, in this example **block** is *num* but must be *Factor*, so use following code to convert:
+```{r}
+# Convert class of column to factor
+dataHTPheno$block <- as.factor(dataHTPheno$block)
+dataHTPheno$day <- as.factor(dataHTPheno$day) 
+dataHTPheno$reading <- as.factor(dataHTPheno$reading) 
+dataManPheno$block <- as.factor(dataManPheno$block)
+dataSoil$block <- as.factor(dataSoil$block)
+dataSoil$barcode <- as.factor(dataSoil$barcode)
+```
+
+Some of our data objects are missing some information, for example, **dataManPheno** and **dataSoil** are missing **genotype** column. To add with ease, similar to the function $vlookup()$ in Excel, use below technique of matching **g_alias** between **dataHTPheno** with each dataObject missing **genotype**:
+```{r}
+# Get genotype name into manually collected phenotype data.
+dataManPheno <- dataManPheno %>%
+  mutate(genotype=dataHTPheno$genotype[match(g_alias,dataHTPheno$g_alias)])
+
+# Get genotype name into soil sample data.
+dataSoil <- dataSoil %>% 
+  mutate(genotype=dataHTPheno$genotype[match(g_alias,dataHTPheno$g_alias)]) 
+
+```
+
+# Data Summarization
+We will summarize the data produced in three ways: (1) Entire Trial Summary Statistics; (2) By-Block Summary Statistics; and (3) By-Line Summary Statistics. (1) & (2) will be accompanied by tables and figures for trial summary statistics to visualize mean and variations of different component traits. (3) will be further processed to perform line selection based upon: Rank Sum Index. (4) Correlations between traits within phenotyping groups will also be run.
+
+## (1) Entire Trial Summary Statistics
+### Manual Phenotypes
+```{r,fig.height=15,fig.width=15}
+manPhenoSummary <- dataManPheno %>%
+  summarise(across(where(is.numeric), .fns = 
+                     list(min = min,
+                          median = median,
+                          mean = mean,
+                          stdev = sd,
+                          q25 = ~quantile(., 0.25),
+                          q75 = ~quantile(., 0.75),
+                          max = max))) %>%
+  pivot_longer(everything(), names_sep='_', names_to=c('variable', '.value'))
+manSum <- as.data.frame(manPhenoSummary)
+
+knitr::kable(manSum,caption="Manual Phenotype Summary Statistics")
+```
+
+\pagebreak
+
+```{r, echo=FALSE, fig.height=15,fig.width=15}
+ggplot(manSum,aes(x=variable,ymin=min,lower=q25,middle=median,upper=q75,ymax=max))+
+  geom_boxplot(stat = "identity") +
+  facet_wrap(~variable,scales="free") +
+  labs(title="Manual Phenotypes Summary",size=30) +
+  theme(
+    plot.title=element_text(size=15),
+    axis.title.x=element_blank(),
+    axis.text.x=element_blank(),
+    axis.text.y=element_text(size=12),
+    axis.ticks.x=element_blank(),
+    strip.text.x=element_text(size=15))
+```
+
+\pagebreak
+
+### High-Throughput Phenotypes (Phenospex)
+```{r, echo=FALSE, fig.height=20,fig.width=15}
+HTSummary <- dataHTPheno %>%
+  summarise(across(where(is.numeric), .fns = 
+                     list(min = min,
+                          median = median,
+                          mean = mean,
+                          stdev = sd,
+                          q25 = ~quantile(., 0.25),
+                          q75 = ~quantile(., 0.75),
+                          max = max))) %>%
+  pivot_longer(everything(), names_sep='_', names_to=c('variable', '.value'))
+HTSum <- as.data.frame(HTSummary)
+
+knitr::kable(HTSum,caption="High-Throughput Phenotype Summary Statistics")
+```
+
+\pagebreak
+
+```{r, echo=FALSE, fig.height=20,fig.width=15}
+ggplot(HTSum,aes(x=variable,ymin=min,lower=q25,middle=median,upper=q75,ymax=max))+
+  geom_boxplot(stat = "identity") +
+  facet_wrap(~variable,scales="free") +
+  labs(title="HTPs Summary",size=30) +
+  theme(
+    plot.title=element_text(size=15),
+    axis.title.x=element_blank(),
+    axis.text.x=element_blank(),
+    axis.text.y=element_text(size=12),
+    axis.ticks.x=element_blank(),
+    strip.text.x=element_text(size=15))
+```
+
+\pagebreak
+
+### Soil Sample
+```{r, echo=FALSE,fig.height=15,fig.width=15}
+soilSummary <- dataSoil %>%
+  summarise(across(where(is.numeric), .fns = 
+                     list(min = min,
+                          median = median,
+                          mean = mean,
+                          stdev = sd,
+                          q25 = ~quantile(., 0.25),
+                          q75 = ~quantile(., 0.75),
+                          max = max))) %>%
+  pivot_longer(everything(), names_sep='_', names_to=c('variable', '.value'))
+soilSum <- as.data.frame(soilSummary)
+
+knitr::kable(soilSum,caption="Soil Sample Summary Statistics")
+```
+\pagebreak
+```{r, echo=FALSE,fig.height=15,fig.width=15}
+ggplot(soilSum,aes(x=variable,ymin=min,lower=q25,middle=median,upper=q75,ymax=max))+
+  geom_boxplot(stat = "identity") +
+  facet_wrap(~variable,scales="free") +
+  labs(title="Soil Samples Summary",size=30) +
+  theme(
+    plot.title=element_text(size=15),
+    axis.title.x=element_blank(),
+    axis.text.x=element_blank(),
+    axis.text.y=element_text(size=12),
+    axis.ticks.x=element_blank(),
+    strip.text.x=element_text(size=15))
+```
+
+\pagebreak
+
+## (2) By-Block Summary Statistics
+### Manual Phenotypes
+```{r, echo=FALSE,fig.height=15,fig.width=15}
+manPhenoSummaryBlock <- dataManPheno %>% group_by(block) %>% 
+  summarise(across(where(is.numeric), .fns = 
+                     list(min = min,
+                          median = median,
+                          mean = mean,
+                          stdev = sd,
+                          q25 = ~quantile(., 0.25),
+                          q75 = ~quantile(., 0.75),
+                          max = max))) %>%
+  pivot_longer(!block,names_sep='_',names_to=c('variable','.value')) %>% 
+  arrange(variable)
+manSumBlock <- as.data.frame(manPhenoSummaryBlock)
+
+knitr::kable(manSumBlock,caption="Manual Phenotype Summary Statistics (by-block)")
+```
+
+\pagebreak
+
+```{r, echo=FALSE,fig.height=15,fig.width=15}
+ggplot(manSumBlock,aes(x=block,ymin=min,lower=q25,middle=median,upper=q75,ymax=max))+
+  geom_boxplot(stat = "identity") +
+  facet_wrap(~variable,scales="free") +
+  labs(title="Manual Phenotype Summary",size=30) +
+  theme(
+    plot.title=element_text(size=15),
+    axis.title.x=element_text(size=15),
+    axis.text.x=element_text(size=12),
+    axis.text.y=element_text(size=12),
+    strip.text.x=element_text(size=15))
+```
+
+\pagebreak
+
+```{r, echo=FALSE, fig.height=20,fig.width=15}
+dataManPheno_long <- tidyr::gather(dataManPheno,variable,value,daysToMaturity:seedpPod10,factor_key=TRUE)
+
+suppressMessages(print(ggplot(dataManPheno_long,aes(x=value,y=block)) + 
+  geom_density_ridges(scale=1) +
+  facet_wrap(~variable,scales="free") +
+  labs(title="Manual Phenotype Density Distribution",size=30) +
+  theme(
+    plot.title=element_text(size=15),
+    axis.title.x=element_text(size=15),
+    axis.text.x=element_text(size=12,angle=45,hjust=1),
+    axis.text.y=element_text(size=12),
+    strip.text.x=element_text(size=15))
+  ))
+```
+
+\pagebreak
+
+### High-Throughput Phenotypes (Phenospex)
+```{r, echo=FALSE, fig.height=20,fig.width=15}
+HTSummaryBlock <- dataHTPheno %>% group_by(block) %>% 
+  summarise(across(where(is.numeric), .fns = 
+                     list(min = min,
+                          median = median,
+                          mean = mean,
+                          stdev = sd,
+                          q25 = ~quantile(., 0.25),
+                          q75 = ~quantile(., 0.75),
+                          max = max))) %>%
+  pivot_longer(!block,names_sep='_',names_to=c('variable','.value')) %>% 
+  arrange(variable)
+HTSumBlock <- as.data.frame(HTSummaryBlock)
+
+knitr::kable(HTSumBlock,caption="High-Throughput Phenotype Summary Statistics (by-block)")
+```
+
+\pagebreak
+
+```{r, echo=FALSE, fig.height=20,fig.width=15}
+ggplot(HTSumBlock,aes(x=block,ymin=min,lower=q25,middle=median,upper=q75,ymax=max))+
+  geom_boxplot(stat = "identity") +
+  facet_wrap(~variable,scales="free") +
+  labs(title="High-Throughput Phenotype Summary",size=30) +
+  theme(
+    plot.title=element_text(size=15),
+    axis.title.x=element_text(size=15),
+    axis.text.x=element_text(size=12),
+    axis.text.y=element_text(size=12),
+    strip.text.x=element_text(size=15))
+```
+
+\pagebreak
+
+```{r, echo=FALSE, fig.height=20,fig.width=15}
+dataHTPheno_long <- tidyr::gather(dataHTPheno,variable,value,biomassDigital:bin5PSRI,factor_key=TRUE)
+
+suppressMessages(print(ggplot(dataHTPheno_long,aes(x=value,y=block)) + 
+  geom_density_ridges(scale=1) +
+  facet_wrap(~variable,scales="free") +
+  labs(title="High-Throughput Phenotype Density Distribution",size=30) +
+  theme(
+    plot.title=element_text(size=15),
+    axis.title.x=element_text(size=15),
+    axis.text.x=element_text(size=12,angle=45,hjust=1),
+    axis.text.y=element_text(size=12),
+    strip.text.x=element_text(size=15))
+  ))
+```
+
+\pagebreak
+
+### Soil Sample
+```{r, echo=FALSE,fig.height=15,fig.width=15}
+soilSummaryBlock <- dataSoil %>% group_by(block) %>% 
+  summarise(across(where(is.numeric), .fns = 
+                     list(min = min,
+                          median = median,
+                          mean = mean,
+                          stdev = sd,
+                          q25 = ~quantile(., 0.25),
+                          q75 = ~quantile(., 0.75),
+                          max = max))) %>%
+  pivot_longer(!block,names_sep='_',names_to=c('variable','.value')) %>% 
+  arrange(variable)
+soilSumBlock <- as.data.frame(soilSummaryBlock)
+
+knitr::kable(soilSumBlock,caption="Soil Sample Summary Statistics (by-block)")
+```
+
+\pagebreak
+
+```{r, echo=FALSE,fig.height=15,fig.width=15}
+ggplot(soilSumBlock,aes(x=block,ymin=min,lower=q25,middle=median,upper=q75,ymax=max))+
+  geom_boxplot(stat = "identity") +
+  facet_wrap(~variable,scales="free") +
+  labs(title="Soil Sample Summary",size=30) +
+  theme(
+    plot.title=element_text(size=15),
+    axis.title.x=element_text(size=15),
+    axis.text.x=element_text(size=12),
+    axis.text.y=element_text(size=12),
+    strip.text.x=element_text(size=15))
+```
+
+\pagebreak
+
+```{r, echo=FALSE, fig.height=20,fig.width=15}
+dataSoil_long <- tidyr::gather(dataSoil,variable,value,EC:manganese,factor_key=TRUE)
+
+suppressMessages(print(ggplot(dataSoil_long,aes(x=value,y=block)) + 
+  geom_density_ridges(scale=1) +
+  facet_wrap(~variable,scales="free") +
+  labs(title="Soil Sample Density Distribution",size=30) +
+  theme(
+    plot.title=element_text(size=15),
+    axis.title.x=element_text(size=15),
+    axis.text.x=element_text(size=12,angle=45,hjust=1),
+    axis.text.y=element_text(size=12),
+    strip.text.x=element_text(size=15))
+  ))
+```
+
+\pagebreak
+
+## (3) By-Line Summary Statistics
+### Manual Phenotypes
+This section uses summary statistics for make selection based on an index. The index is formed by linear combination of yield trait averages as ranks.
+**100 Seed Weight + Weight of Pod  Seed + Weight of Seed + Mean Seed/Pod - Days to Maturity**
+This index is summing ranks of yield related traits (larger ranks are better) and subtracting away the time it takes to accumulate the yield (larger ranks are worse). Therefore, the longer it takes to maturity, the more the index is penalized. 
+```{r,fig.height=15,fig.width=15}
+# Create data object of by-line summary statistics
+manPhenoSummaryLine <- dataManPheno %>% group_by(g_alias) %>% 
+  summarise(across(where(is.numeric), .fns = 
+                     list(min = min,
+                          median = median,
+                          mean = mean,
+                          stdev = sd,
+                          q25 = ~quantile(., 0.25),
+                          q75 = ~quantile(., 0.75),
+                          max = max))) %>%
+  pivot_longer(!g_alias,names_sep='_',names_to=c('variable','.value')) %>% 
+  arrange(variable)
+
+# Create data object of by-line trait means
+manPhenoMeanLine <- dataManPheno %>% group_by(g_alias) %>% 
+  summarise(across(where(is.numeric),mean))
+
+#write.csv(manPhenoMeanLine,"C:/Users/natha/OneDrive/Desktop/UH_Manoa/PhD/SideProjects/WorldVeg/MungBean/miniCore/outputs/phenoMeans.csv")
+
+# Rank each line for each trait
+manPhenoMeanRanks <- manPhenoMeanLine %>% mutate(across(where(is.numeric),rank))
+
+# Selection index: Sum ranks of yield related traits (high rank is best) and subtract days to maturity (low rank is best)
+manPhenoMeanRanks <- manPhenoMeanRanks %>% 
+  mutate(yieldRankAcc=hundredSeedWeight+podWseedWeight+seedWeight+meanSeedpPod-daysToMaturity) %>% mutate(rank=rank(desc(yieldRankAcc)))
+
+# Order index by rank (lowest rank is best - higher index means high yield in rapid time)
+manPhenoMeanRanks <- manPhenoMeanRanks[order(manPhenoMeanRanks$rank),]
+
+# Extract the top 10% of lines for the index
+selInd <- manPhenoMeanRanks[c(1:(round(.1*nrow(manPhenoMeanRanks)))),c("g_alias","rank")]
+
+# Reintroduce means of yield related traits
+selIndMeans <- merge(selInd,manPhenoMeanLine,by.x="g_alias")
+selIndMeans <- selIndMeans[order(selIndMeans$rank),c(1:8)]
+
+# Output table of top 10% of lines
+knitr::kable(selIndMeans,caption="Rank Sum Selected Lines - Rapid Yield Accumulation",col.names=c("Genotype","Yield Rank","Days to Maturity","Plant #","100 Seed Weight","Weight - Pod & Seed","Weight - Seed","Mean Seeds/Pod"))
+```
+
+\pagebreak
+
+Below we subset 8 HTP traits to view their interaction along the days of observation by Phenospex. If you care to observe a different trait, replace one of the existing traits found in the **subset()** function with your trait of interest. To find the names of the traits, use the code **levels(dataHTPheno_long$variable)** and copy the name of the trait you are interested in, making sure to paste inside of quotation marks.
+```{r,fig.height=20,fig.width=15}
+
+dataHTPhenoFacet <- subset(dataHTPheno_long,variable%in%c("meanGreenness","height","leafAngle","leafAreaIndex","lightPenDepth","meanNDVI","meanNPCI","meanPSRI"))
+
+ggplot(dataHTPhenoFacet,aes(x=day,y=value)) + 
+  geom_jitter() +
+  facet_wrap(~variable,scales="free",ncol=2) +
+  labs(title="HTP Daily Trends",size=30) +
+  theme(
+    plot.title=element_text(size=15),
+    axis.title.x=element_text(size=15),
+    axis.text.x=element_text(size=8,angle=45,hjust=1),
+    axis.text.y=element_text(size=8),
+    strip.text.x=element_text(size=15))
+```
+
+### High-Throughput Phenotypes (Phenospex)
+Here we must designate whether high phenotypic observations are good or bad. For example, a high NDVI corresponds with a photosynthetically active plant. The metric is computed by analyzing differences in Near-Infrared (NIR) and Visible light spectrum $NDVI=(NIR-VIS)/(NIR+VIS)$. A healthy plant absorbs VIS spectrum and reflects NIR, therefore, value close to +1 means healthy green plant and 0 is unhealthy plant/non-plant surfaces. 
+
+List of Vegetation Indices and designation of high/low as indication of "good" phenotypic value: 
+High- biomassDigital, meanGreenness, height, heightMax, leafAngle, leafArea, leafAreaIndex, leafAreaProj, leafInclination, lightPenDepth, meanNDVI, bin3NDVI, bin4NDVI, bin5NDVI, meanNPCI
+Low- bin0NDVI, bin1NDVI, bin2NDVI, meanPSRI
+Unused- meanHue, bin0-5Hue
+```{r,fig.height=20,fig.width=15}
+# Create data object of by-line summary statistics
+HTPhenoSummaryLine <- dataHTPheno %>% group_by(g_alias) %>% 
+  summarise(across(where(is.numeric), .fns = 
+                     list(min = min,
+                          median = median,
+                          mean = mean,
+                          stdev = sd,
+                          q25 = ~quantile(., 0.25),
+                          q75 = ~quantile(., 0.75),
+                          max = max))) %>%
+  pivot_longer(!g_alias,names_sep='_',names_to=c('variable','.value')) %>% 
+  arrange(variable)
+
+# Create data object of by-line trait means
+HTPhenoMeanLine <- dataHTPheno %>% group_by(g_alias) %>% 
+  summarise(across(where(is.numeric),mean))
+
+# Rank each line for each trait (higher values result higher ranks)
+HTPhenoMeanRanks <- HTPhenoMeanLine %>% mutate(across(where(is.numeric),rank))
+
+# Selection index: Sum ranks of traits where high rank is best and subtract traits where low rank is best
+HTPhenoMeanRanks <- HTPhenoMeanRanks %>% 
+  mutate(phenomicRankAcc=biomassDigital+meanGreenness+height+heightMax+leafAngle+leafArea+leafAreaIndex+leafAreaProj+leafInclination+lightPenDepth+meanNDVI+bin3NDVI+bin4NDVI+bin5NDVI+meanNPCI-bin0NDVI-bin1NDVI-bin2NDVI-meanPSRI) %>% mutate(rank=rank(desc(phenomicRankAcc)))
+
+# Order index by rank (lowest rank is best - higher index means good phenomic mean value in rank)
+HTPhenoMeanRanks <- HTPhenoMeanRanks[order(HTPhenoMeanRanks$rank),]
+
+# Extract the top 10% of lines for the index
+selIndPhenomic <- HTPhenoMeanRanks[c(1:(round(.1*nrow(HTPhenoMeanRanks)))),c("g_alias","rank")]
+
+# Reintroduce means of yield related traits
+selIndPhenomicMeans <- merge(selIndPhenomic,HTPhenoMeanLine,by.x="g_alias")
+selIndPhenomicMeans <- selIndPhenomicMeans[order(selIndPhenomicMeans$rank),c(1:4,11:12,20:34,40)]
+
+# Output table of top 10% of lines
+knitr::kable(selIndPhenomicMeans,caption="Rank Sum Selected Lines - Phenomic Rank Index")
+```
+
+If we compare our selections, from the Rank Sum Index, only 13% of the selected genotypes on manual phenotypes are the same as forming a similar index on HTP from Phenospex. This is likely due to the selections made on HTP are made based upon growth, plant health, and leaf characteristics while manual phenotypes are yield component traits.
+```{r}
+# Calculate how many selections from mean index were also found in the HTP index
+length(which(selIndMeans$g_alias%in%selIndPhenomicMeans$g_alias))
+
+# The names of the lines selected by Rank sum index on BLUE and mean
+selIndMeans[selIndMeans$g_alias%in%selIndPhenomicMeans$g_alias,]["g_alias"]
+```
+
+\pagebreak
+## (4) Trait Correlations
+### Manual Phenotypes
+Some meaningful correlations include the positive correlation between 100 seed weight and 10 pod weight (.866) and the negative correalation between days to maturity and total seed weight (-0.436).
+```{r,fig.height=15,fig.width=15}
+corManPheno <- cor(dataManPheno[sapply(dataManPheno,is.numeric)])
+
+corrplot(corManPheno,method="color",tl.cex=2,tl.col="black",cl.cex=2)
+```
+\pagebreak
+
+### High-Throughput Phenotypes (Phenospex)
+```{r,fig.height=15,fig.width=15}
+corHTPheno <- cor(dataHTPheno[sapply(dataHTPheno,is.numeric)])
+
+corrplot(corHTPheno,method="color",tl.cex=2,tl.col="black",cl.cex=2)
+```
+\pagebreak
+
+### All Phenotypes
+In order to run the correlations for all phenotypes, we must take the mean by-line for every trait due to continuous nature of the HTP. We have already calculated these **HTPhenoMeanLine** and **manPhenoMeanLine**.
+Some meaningful correlations between manual phenotypes and HTP include the positive correlation between 100 seed weight and Light Penetration Depth (0.316) and the positive correlation between 10 pod weight and Light Penetration Depth (0.333). Projected Leaf Area is moderately correlated with Pod With Seed Weight (0.290) and with Total Seed Weight (0.256). Mean Seeds/Pod is moderately correlated with height (0.285). Ten Pod Weight is negatively correlated with NDVI Bin 3 (-0.239).
+```{r,fig.height=15,fig.width=15}
+allPhenoMeanLine <- manPhenoMeanLine %>% 
+  left_join(HTPhenoMeanLine,by="g_alias")
+
+corAllPheno <- cor(allPhenoMeanLine[sapply(allPhenoMeanLine,is.numeric)],use="complete.obs")
+
+corDF <- as.data.frame(corAllPheno)
+
+corrplot(corAllPheno,method="color",tl.cex=2,tl.col="black",cl.cex=2)
+```
+
+# Data Analysis
+Now that we fully understand the structure and relationships of the data present in the trial, we move forward with data analysis. This step will progress from simple analysis to complex analysis: (1) Linear Mixed-Model (BLUEs of Line Performance and BLUPs for Cross Validation); (2) Linear Mixed-Model with Phenomics (BLUEs of Line Performance and BLUPS for Cross Validation); (3) Linear Mixed-Model with Genomics (Genomic Selection of Lines); (4) Linear Mixed-Model with Genomics and Phenomics (Genomic/Phenomic Selection of Lines); (5) Non-Linear Mixed Model applied to sections (2)-(4); (6) Machine-Learning Algorithms applied to Sections (2)-(4); (7) Comparison of Selections and Predictive Abilities. 
+
+This section should provide insight into line selection for breeding value and for performance. Phenomics data takes into account non-additive genetic variance and will identify high-performing lines. Genomics data separates non-additive genetic variance from additive genetic variance, identifying selections for use in breeding improvement. A caveat to be considered, the mungbean data is derived from a single environment and single year, for more informative predictions these models should include increases to either environments tested, years tested, or both.
+
+## (1) Linear Mixed-Model (BLUEs of Line Performance and BLUPS for Cross Validation)
+### Data Manipulation
+To easily run (1), we need to combine relevant data sets: Manual Phenotypes with Soil Sample Information.
+```{r}
+dataManPheno <- dataManPheno %>%
+  mutate(soilSample=dataSoil$samplePosition[match(Barcode,dataSoil$position)])
+```
+
+### Model
+Here we are estimating line performance for yield (pod with seed weight). The form of **Model 1** is:
+$$ yield_{ijkl} = \mu + \beta_{i}genotype_i + block_j + soil_k + \beta_{l}maturity_l + error_{ijkl}$$
+where the $yield_{ijkl}$ is the estimated value of linear mixed-model regression of $genotype_i$ where $\beta_{i}$ tells us the fixed effect of the genotype, $block_j$ is the random effect of the $j$th block with $block_j \sim N(0,\sigma^2_b)$, $soil_k$ is the random effect of the $k$th soil sample with $soil_k \sim N(0,\sigma^2_s)$, and $maturity_l$ where $\beta_{l}$ tells us the fixed effect of the days to maturity on yield.
+
+```{r, results='hide'}
+lmm1a <- lmer(podWseedWeight~g_alias+(1|block)+(1|soilSample)+daysToMaturity,data=dataManPheno)
+summary(lmm1a)
+```
+
+and the **Model 2**, including plant count in the plot, is:
+$$ yield_{ijklm} = \mu + \beta_{i}genotype_i + block_j + soil_k + \beta_{l}maturity_l + \beta_{m}count_m + error_{ijklm}$$
+
+where the $yield_{ijklm}$ is the estimated value of linear mixed-model regression of **Model 1** with $count_m$ where $\beta_{c}$ tells us the fixed effect of the number of plants in a plot on yield. 
+
+```{r, results='hide'}
+lmm1b <- lmer(podWseedWeight~g_alias+(1|block)+(1|soilSample)+daysToMaturity+plantCount,data=dataManPheno)
+summary(lmm1b)
+```
+
+### Model Comparison
+Completed using AIC, which as a method of comparison takes into account overfitting of models by penalizing a model for additional covariates. Even considering this, **Model 2** is highly significantly different from **Model 1**, therefore, we move forward with it's BLUEs for line performance.
+```{r}
+suppressMessages(anova(lmm1a,lmm1b))
+```
+
+### Extracting Line Best-Linear Unbiased Estimates (BLUEs)
+Run univariate linear mixed-models for each trait to extract BLUEs for genotypes of each trait using chosen model **Model 2**
+```{r}
+# Write a function to apply univariate LMM to each trait
+bluesLMM <- function(traits, dat = ".") {
+b<- as.data.frame(fixef(lmer(paste0(traits, "~0+g_alias+(1|block)+(1|soilSample)+daysToMaturity+plantCount"),data=dat)))
+}
+
+# List the names of the traits
+traits <- colnames(dataManPheno[ , purrr::map_lgl(dataManPheno, is.numeric)])
+# List the names of traits used as predictors/ independent variables
+predTraits <- c("daysToMaturity","plantCount")
+# Remove predictor traits from response traits
+traits <- traits[!traits %in% predTraits]
+# Apply function to run univariate models and output BLUEs
+blues <- suppressMessages(lapply(traits,bluesLMM,dat=dataManPheno))
+# Combine BLUEs and rename columns to names of traits estimated
+bluesOut <- suppressMessages(map2(blues,traits,~set_names(..1, ..2) %>%
+                      rownames_to_column(var="g_alias")) %>%
+                      reduce(full_join))
+# Remove nuisance descriptor in the column
+bluesOut$g_alias <- gsub("g_alias", "",bluesOut$g_alias)
+# Count how many traits are used as predictors
+c <- length(predTraits)
+# Remove non-Line estimates from dataframe
+lineBlues <- slice(bluesOut, 1:(n()-c[1]))
+```
+
+Predictive ability of each trait (Pearson's Correlation of Mean Observed Value and BLUE Predicted Value)
+```{r}
+manPhenoMeanLine <- arrange(manPhenoMeanLine,g_alias)
+
+lineMeans <- manPhenoMeanLine[,!(names(manPhenoMeanLine)%in%predTraits)]
+
+purrr::map2_dbl(
+  .x = lineMeans[c(1:length(traits)+1)],
+  .y = lineBlues[c(1:length(traits)+1)],
+  ~ cor(.x, .y)
+  )
+```
+
+### Line Selection - Part A
+Now we move on to perform line selection based on the best linear unbiased estimates of our traits of interest by forming an index, the same way we did in section (3) By-Line Summary Statistics - Manual Phenotypes. The only difference here is we will no longer subtract the ranking of days to maturity because this effect is removed from the BLUEs through regression along with the effect of soil characteristics differences. 
+```{r}
+# Rank each line for each trait
+manPhenoBluesRanks <- lineBlues %>% mutate(across(where(is.numeric),rank))
+
+# Selection index: Sum ranks of yield related traits (high rank is best) and subtract days to maturity (low rank is best)
+manPhenoBluesRanks <- manPhenoBluesRanks %>% 
+  mutate(yieldRankAcc=hundredSeedWeight+podWseedWeight+seedWeight+meanSeedpPod) %>% mutate(rank=rank(desc(yieldRankAcc)))
+
+# Order index by rank (lowest rank is best - higher index means high yield in rapid time)
+manPhenoBluesRanks <- manPhenoBluesRanks[order(manPhenoBluesRanks$rank),]
+
+# Extract the top 10% of lines for the index
+selInd <- manPhenoBluesRanks[c(1:(round(.1*nrow(manPhenoBluesRanks)))),c("g_alias","rank")]
+
+# Reintroduce BLUEs of yield related traits
+selIndBlues <- merge(selInd,lineBlues,by.x="g_alias")
+selIndBlues <- selIndBlues[order(selIndBlues$rank),c(1:7)]
+
+# Output table of top 10% of lines
+knitr::kable(selIndBlues,caption="Rank Sum Selected Lines (BLUEs) - Rapid Yield Accumulation",col.names=c("Genotype","Yield Rank (BLUE)","100 Seed Weight (BLUE)","Weight - Pod & Seed (BLUE)","Weight - Seed (BLUE)","Mean Seeds/Pod (BLUE)","Weight - 10 Pod (BLUE)"))
+```
+
+If we compare our selections, from the Rank Sum Index, 76% of the selected genotypes on manual phenotypes are the same between forming this index on mean versus BLUE. Our linear mixed-model method removed phenotypic variation attributable to soil samples and plant counts during the trial. Our selection is at a proportion of 10% of lines (30 lines) from the entire collection.
+```{r}
+# Calculate how many selections from BLUE index were also found in the mean index
+length(which(selIndBlues$g_alias%in%selIndMeans$g_alias))
+
+# The names of the lines selected by Rank sum index on BLUE and mean
+selIndBlues[selIndBlues$g_alias%in%selIndMeans$g_alias,]["g_alias"]
+```
+***************************************************************************
+### K-Fold Cross Validation for Line BLUPs (Predictive Ability from K=100)
+Shuffle the lines to avoid any correlations among similarly labeled individuals.
+```{r}
+ndxShuf <- sample(1:dim(dataManPheno)[1],) #create a list to shuffle
+
+phenoShuf <- dataManPheno[ndxShuf, ] #shuffle phenotype data rows
+
+phenoShuf <- phenoShuf[,c(1:3,23,24,4:22)] #have all numeric columns (traits to be predicted) at end of dataframe
+```
+Loop through each phenotype.
+```{r}
+k <- 100 # How many K-partitions are we breaking our data
+predictors <- c("g_alias","block","soilSample","daysToMaturity","plantCount")
+LineBLUPs <- list() # empty list to store the line BLUPs for each trait 
+PredAbility <- list() # empty list to store the predictive ability of the model for each trait 
+predStor <- vector(length=length(ndxShuf)) # empty vector to store within the loop each kcv to then be used for calculating predictive ability correlation(predicted,observed)
+
+suppressMessages(print(
+  for (i in 10:ncol(phenoShuf)) {
+ 
+  cnt <- 1:floor(length(ndxShuf)/k) #how many observations per group to be left out 
+  
+  for (j in 1:k){
+    
+    train <- phenoShuf[-cnt,] # training dataset for each j loop through k partitions
+    test <- phenoShuf[cnt,] # testing dataset for each j loop through k partitions
+    
+    # Fit an LMM using the lme4 package
+    lmm <- lmer(as.formula(paste0(colnames(train)[i],"~(1|g_alias)+(1|block)+(1|soilSample)+daysToMaturity+plantCount")),data=train) # linear mixed model on training set
+    
+    predicted <- data.frame(predict(lmm,test)) # predict values of testing set
+    
+    predStor[cnt] <- predicted[,1] # store the predicted values
+
+    cnt <- cnt + floor(length(ndxShuf)/k) #change cnt to next group
+    
+  }
+  
+  LineBLUPs[[i]] <- predStor
+  PredAbility[[i]] <- cor(predStor,phenoShuf[,i]) #store prediction accuracy by for each trait LMM
+  
+}
+))
+
+#combine the loop lists in to dataframes
+LineBLUPsLMM <- do.call(cbind,LineBLUPs[10:ncol(phenoShuf)])
+PredAbilityLMM <- do.call(cbind,PredAbility[10:ncol(phenoShuf)])
+
+#apply phenotype and line names to dataframes
+colnames(LineBLUPsLMM) <- c(paste0(colnames(phenoShuf[,10:ncol(phenoShuf)]),"_LmmBLUPKcv"))
+LineBLUPsLMM <- as.data.frame(LineBLUPsLMM)
+colnames(PredAbilityLMM) <- c(paste0(colnames(phenoShuf[,10:ncol(phenoShuf)]),"_LmmPredAKcv"))
+LineBLUPsLMM$g_alias <- c(paste0(phenoShuf$g_alias))
+LineBLUPsLMM <- LineBLUPsLMM %>% group_by(g_alias) %>% summarize_if(is.numeric,mean,na.rm=TRUE)
+PredAbilityLMM <- as.data.frame(t(PredAbilityLMM))
+colnames(PredAbilityLMM) <- "predictiveAbilityLMM"
+
+#write.csv(LineBLUPsLMM,"miniCore/outputs/LineBLUPsLMM.csv")
+#write.csv(PredAbilityLMM,"miniCore/outputs/PredAbilityLMM.csv")
+
+```
+
+### Heritability of these traits
+We fit these models to estimate how much total phenotypic variance can be attributed to genotype by setting genotype as random and remaining predictors to fixed. 
+
+100-Seed Weight Heritability
+```{r}
+dataManPhenoSoil <- read.csv("C:/Users/natha/OneDrive/Desktop/UH_Manoa/PhD/SideProjects/WorldVeg/MungBean/miniCore/dataManPhenoSoil.csv")
+
+# run model with random genotype and fixed other predictors
+lmmHsqHSW <- lmer(hundredSeedWeight~(1|g_alias)+block+soilSample,data=dataManPhenoSoil)
+# pull variance components from the model
+vc<- data.frame(VarCorr(lmmHsqHSW))
+VargenoHSW<- vc[1,'vcov']
+VarresidHSW<- vc[2,'vcov']
+# Calculate additive genetic variance in the population
+VarabaseHSW<- 4*VargenoHSW
+# how many reps were used in the trial
+nreps <- mean(table(dataManPhenoSoil$g_alias))
+# calculate the narrow-sense heritability 
+H2hundredSeed <- VarabaseHSW/(VarabaseHSW+VargenoHSW/nreps)
+print(paste0("Narrow-sense heritability of 100-seed weight, based on LMM, is ",round(H2hundredSeed,digits=4)))
+```
+Pod with seed weight Heritability
+```{r}
+# run model with random genotype and fixed other predictors
+lmmHsqPSW <- lmer(podWseedWeight~(1|g_alias)+block+soilSample,data=dataManPhenoSoil)
+# pull variance components from the model
+vc<- data.frame(VarCorr(lmmHsqPSW))
+VargenoPSW<- vc[1,'vcov']
+VarresidPSW<- vc[2,'vcov']
+# Calculate additive genetic variance in the population
+Varabase<- 4*VargenoPSW
+# how many reps were used in the trial
+nreps <- mean(table(dataManPhenoSoil$g_alias))
+# calculate the narrow-sense heritability 
+H2PSW <-  Varabase/(Varabase+VargenoPSW/nreps)
+print(paste0("Narrow-sense heritability of Pod with seed weight, based on LMM, is ",round(H2PSW,digits=4)))
+```
+Seed weight Heritability
+```{r}
+# run model with random genotype and fixed other predictors
+lmmHsqSW <- lmer(seedWeight~(1|g_alias)+block+soilSample,data=dataManPhenoSoil)
+# pull variance components from the model
+vc<- data.frame(VarCorr(lmmHsqPSW))
+VargenoSW<- vc[1,'vcov']
+VarresidSW<- vc[2,'vcov']
+# Calculate additive genetic variance in the population
+Varabase<- 4*VargenoSW
+# how many reps were used in the trial
+nreps <- mean(table(dataManPhenoSoil$g_alias))
+# calculate the narrow-sense heritability 
+H2SW <-  Varabase/(Varabase+VargenoSW/nreps)
+print(paste0("Narrow-sense heritability of Seed weight, based on LMM, is ",round(H2PSW,digits=4)))
+```
+
+### Line Selection - Part B: Predictive Ability Weighting
+Now we move on to perform line selection based on the best linear unbiased predictions for our traits of interest by forming an index, the same way we did above for calculating using BLUEs. The only difference here is we will be weighting ranks by the predictive ability of the model for a given trait by using the k-fold (k=100) cross validation model predictive ability. This is to adjust the ranking depending on how well that trait can be predicted.
+```{r}
+# Rank each line for each trait
+blupsRankLMM <- LineBLUPsLMM %>% mutate(across(where(is.numeric),rank))
+
+# Weight each ranking by the predictive ability for that trait
+for (i in 2:ncol(blupsRankLMM)) {
+  num <- PredAbilityLMM[i,]
+  blupsRankLMM[,i] <- blupsRankLMM[,i]*num
+}
+
+# Selection index: Sum ranks of yield related traits (high rank is best) and subtract days to maturity (low rank is best)
+blupsRankLMMSum <- blupsRankLMM %>% 
+  mutate(yieldRankAcc=hundredSeedWeight_LmmBLUPKcv+podWseedWeight_LmmBLUPKcv+seedWeight_LmmBLUPKcv+meanSeedpPod_LmmBLUPKcv) %>% mutate(rank=rank(desc(yieldRankAcc)))
+
+# Order index by rank (lowest rank is best - higher index means high yield in rapid time)
+blupsRankLMMSum <- blupsRankLMMSum[order(blupsRankLMMSum$rank),]
+
+# Extract the top 10% of lines for the index
+selInd <- blupsRankLMMSum[c(1:(round(.1*nrow(blupsRankLMMSum)))),c("g_alias","rank")]
+
+# Reintroduce BLUEs of yield related traits
+selIndBlupsLMM <- merge(selInd,LineBLUPsLMM,by.x="g_alias")
+selIndBlupsLMM <- selIndBlupsLMM[order(selIndBlupsLMM$rank),c(1:7)]
+
+# Output table of top 10% of lines
+knitr::kable(selIndBlues,caption="Rank Sum Selected Lines (BLUPs) - Rapid Yield Accumulation",col.names=c("Genotype","Yield Rank (BLUP)","100 Seed Weight (BLUP)","Weight - Pod & Seed (BLUP)","Weight - Seed (BLUP)","Mean Seeds/Pod (BLUP)","Weight - 10 Pod (BLUP)"))
+```
+### Selection Comparison - Part A and Part B
+All the same genotypes are selected the same. This means that our predictive ability in each model does not have a disparaging effect on line selection.
+```{r}
+# Calculate how many selections from BLUE index were also found in the mean index
+length(which(selIndBlues$g_alias%in%selIndBlupsLMM$g_alias))
+
+# The names of the lines selected by Rank sum index on BLUE and mean
+selIndBlues[selIndBlues$g_alias%in%selIndBlupsLMM$g_alias,]["g_alias"]
+```
+
+## (2) Linear Mixed-Model with Phenomics (BLUPS for Cross Validation)
+### Data Manipulation
+To easily run (2), we need to conduct some data manipulation. First, we need to convert the HTP Phenomics data into long format and then into a matrix where rows are genotype and columns are a combination of day of reading and HTP trait. This matrix will serve as a matrix covariate in the Multivariate Linear Mixed-Model, similarly to using SNPs in RRBLUP or converting the SNP matrix into a genomic relationship matrix for GBLUP.
+```{r}
+# Model A Data Manipulation
+# subset htp and summarize average across blocks grouping by date of measurement and line
+# convert to matrix (lines are rows, date as columns, HTP trait as values)
+ndviMatrix <- dataHTPheno %>% 
+  group_by(g_alias,day) %>% 
+  summarise(meanNDVI=mean(meanNDVI)) %>% 
+  spread(day,meanNDVI)%>% column_to_rownames(var="g_alias")
+ndviMatrix <- data.matrix(ndviMatrix)
+# write dataManPheno (with soil sample info) as csv and reinput - weird caveat with using sommer where data file must be .csv input
+#write.csv(dataManPheno,"miniCore/dataManPhenoSoil.csv")
+data <- read.csv("miniCore/dataPhenoSoil.csv")
+# subset data for only manual phenotyped also in NDVI
+dat <- data %>% filter(g_alias%in%rownames(ndviMatrix))
+dat$block <- as.factor(dat$block)
+```
+
+```{r}
+# Model B Data Manipulation
+# convert the HTP dataset into long format
+longHTP <- dataHTPheno %>% 
+  group_by(g_alias,day) %>% 
+  summarise_if(is.numeric, mean, na.rm = TRUE) %>% 
+  pivot_longer(!c(g_alias,day),names_to="HTP",values_to="value") %>% 
+  arrange(HTP)
+# create a new column as a combination of the day and the HTP trait (basically a phenomics SNP)
+longHTP$day_HTP <- paste("day",longHTP$day,"_",longHTP$HTP,sep="")
+# create a matrix of genotype (rows) by day/HTP trait (columns) to be used in MLMM
+HTP <- longHTP %>% select(!c(day,HTP)) %>% 
+  spread(day_HTP,value) %>% column_to_rownames(var="g_alias")
+```
+
+```{r}
+# Model C Data Manipulation
+# https://statisticsbyjim.com/regression/multicollinearity-in-regression-analysis/
+# remove correlated HTP phenomics traits to reduce colinearity of our predictions and increase the power of our predictions
+# access the correlations matrix from earlier in this code
+corHTP <- corHTPheno
+corHTP[!lower.tri(corHTP)] <- 0
+
+# Count the number of correlations greater than 0.70 or less than -0.70 per HTP covariate
+colinear <- data.frame(apply(corHTPheno,2,function(x) sum(abs(x) > 0.70)))
+colnames(colinear) <- "count"
+# Remove covariates from the HTP matrix that show multicolinearity with >11 others (greater than 0.70 or less than -0.70)
+colCov <- row.names(subset(colinear,count>11))
+# Subset long format HTP, removing the covariates listed above in colCov
+colinearlongHTP <- subset(longHTP,!HTP%in%colCov)
+# create a matrix of genotype (rows) by day/HTP trait (columns) to be used in MLMM
+colinearHTP <- colinearlongHTP %>% select(!c(day,HTP)) %>% 
+  spread(day_HTP,value) %>% column_to_rownames(var="g_alias")
+```
+
+
+### Model
+Here we are estimating line performance for yield (pod with seed weight). The form of **Model A** is:
+$$ yield_{ijklm} = genotype_i + block_j + soil_k + \beta_{l}maturity_l + \beta_{m}count_m + error_{ijklm}$$
+where the $yield_{ijklm}$ is the predicted value of multivariate linear mixed-model regression of $genotype_i$ informed with a single phenomics reading (meanNDVI) where ${HTP=ndviP\sigma^2_u}$ is the variance covariance matrix for the random effect $genotype$, from the multivariate normal distribution ${genotype \sim MVN(0,ndviP\sigma^2_u)}$ with ${ndviP}$ being the phenomic relationship matrix from meanNDVI, $block_j$ is the random effect of the $j$th block with $block_j \sim N(0,\sigma^2_b)$, $soil_k$ is the random effect of the $k$th soil sample with $soil_k \sim N(0,\sigma^2_s)$, $maturity_l$ where $\beta_{l}$ tells us the fixed effect of the days to maturity on yield and $count_m$ where $\beta_{c}$ tells us the fixed effect of the number of plants in a plot on yield.
+
+```{r,results='hide'}
+ndviP <- A.mat(ndviMatrix)
+
+mlmm2a <- mmer(podWseedWeight~daysToMaturity+plantCount,
+                random=~block+soilSample+vsr(g_alias,Gu=ndviP),
+                rcov=~units,
+                data=dat,verbose=TRUE)
+summary(mlmm2a)
+```
+
+Here we are predicting line performance for yield (pod with seed weight). The form of **Model B** is:
+$$ yield_{ijklm} = genotype_i + block_j + soil_k + \beta_{l}maturity_l + \beta_{m}count_m + error_{ijklm}$$
+where the $yield_{ijklm}$ is the predicted value of multivariate linear mixed-model regression of $genotype_i$ informed with all phenomics readings where ${HTP=P\sigma^2_u}$ is the variance covariance matrix for the random effect $genotype$, from the multivariate normal distribution ${genotype \sim MVN(0,P\sigma^2_u)}$ with ${P}$ being the phenomic relationship matrix, $block_j$ is the random effect of the $j$th block with $block_j \sim N(0,\sigma^2_b)$, $soil_k$ is the random effect of the $k$th soil sample with $soil_k \sim N(0,\sigma^2_s)$, $maturity_l$ where $\beta_{l}$ tells us the fixed effect of the days to maturity on yield, and $count_m$ where $\beta_{c}$ tells us the fixed effect of the number of plants in a plot on yield.
+
+```{r,results='hide'}
+P <- A.mat(HTP)
+
+mlmm2b <- mmer(podWseedWeight~daysToMaturity+plantCount,
+                random=~block+soilSample+vsr(g_alias,Gu=P),
+                rcov=~units,
+                data=dat,verbose=TRUE)
+summary(mlmm2b)
+```
+
+Here we are predicting line performance for yield (pod with seed weight). The form of **Model C** is the same as **Model B**, but, we performed some covariate removal to reduce colinearity in our phenomics data. 
+
+```{r}
+colinearP <- A.mat(colinearHTP)
+
+mlmm2c <- mmer(podWseedWeight~daysToMaturity+plantCount,
+                random=~block+soilSample+vsr(g_alias,Gu=colinearP),
+                rcov=~units,
+                data=dat,verbose=TRUE)
+summary(mlmm2c)
+```
+
+### Model Comparison
+Completed using AIC, which as a method of comparison takes into account overfitting of models by penalizing a model for additional covariates. Even considering this, **Model B** is highly significantly different from **Model A** and is highly significantly different from **Model C**, therefore, we move forward with it's BLUPs (mlmm2b) for line performance. We are selecting to move forward with the full model with all covariates, despite colinearity, because we are looking for accurate predictions, not estimates of covariates. See this link for an explanation: https://statisticsbyjim.com/regression/multicollinearity-in-regression-analysis/; or go to the citation they reference: Applied Linear Statistical Models, p289, 4th Edition.
+```{r}
+suppressMessages(anova(mlmm2a,mlmm2b))
+suppressMessages(anova(mlmm2b,mlmm2c))
+```
+
+### Heritability of traits with and without phenomics
+Narrow-sense heritability of these yield component traits is computed by taking the variance of the phenotype attributed to the line and dividing by the residual variances in the model. As will be seen below, using phenomics data in the model is increasing heritability to near perfect, suggesting overfitting of the model. See this link: https://www.ncbi.nlm.nih.gov/pmc/articles/PMC5651917/ to understand how to account for this. This link is justification for using cross-validation for realistic approximations of heritability. 
+
+100-Seed Weight
+```{r}
+# with phenomics
+HsqPBLUP <- mmer(hundredSeedWeight~daysToMaturity+plantCount,
+                random=~block+soilSample+vsr(g_alias,Gu=P),
+                rcov=~units,
+                data=dat,verbose=FALSE)
+# extract variance components from mmer function
+vc <- summary(HsqPBLUP)$varcomp
+# solve for narrow-sense heritability
+HsqHSWpblup <- vc[3,1]/sum(vc[,1])
+print(paste0("The narrow-sense heritability for 100-Seed Weight, based on Phenomics BLUP, is ",round(HsqHSWpblup,digits=4)))
+
+# without phenomics
+HsqBLUP <- mmer(hundredSeedWeight~daysToMaturity+plantCount,
+                random=~block+soilSample+g_alias,
+                rcov=~units,
+                data=dat,verbose=FALSE)
+# extract variance components from mmer function
+vc <- summary(HsqBLUP)$varcomp
+# solve for narrow-sense heritability
+HsqHSWblup <- vc[3,1]/sum(vc[,1])
+print(paste0("The narrow-sense heritability for 100-Seed Weight, based on BLUP, is ",round(HsqHSWblup,digits=4)))
+```
+
+Pod with Seed Weight
+```{r}
+# with phenomics
+HsqPBLUP <- mmer(podWseedWeight~daysToMaturity+plantCount,
+                random=~block+soilSample+vsr(g_alias,Gu=P),
+                rcov=~units,
+                data=dat,verbose=FALSE)
+# extract variance components from mmer function
+vc <- summary(HsqPBLUP)$varcomp
+# solve for narrow-sense heritability
+HsqPSWpblup <- vc[3,1]/sum(vc[,1])
+print(paste0("The narrow-sense heritability for Pod with seed Weight, based on Phenomics BLUP, is ",round(HsqPSWpblup,digits=4)))
+
+# without phenomics
+HsqPBLUP <- mmer(podWseedWeight~daysToMaturity+plantCount,
+                random=~block+soilSample+g_alias,
+                rcov=~units,
+                data=dat,verbose=FALSE)
+# extract variance components from mmer function
+vc <- summary(HsqPBLUP)$varcomp
+# solve for narrow-sense heritability
+HsqPSWblup <- vc[3,1]/sum(vc[,1])
+print(paste0("The narrow-sense heritability for Pod with seed Weight, based on BLUP, is ",round(HsqPSWblup,digits=4)))
+```
+
+Mean seeds per pod
+```{r}
+# with phenomics
+HsqPBLUP <- mmer(meanSeedpPod~daysToMaturity+plantCount,
+                random=~block+soilSample+vsr(g_alias,Gu=P),
+                rcov=~units,
+                data=dat,verbose=FALSE)
+# extract variance components from mmer function
+vc <- summary(HsqPBLUP)$varcomp
+# solve for narrow-sense heritability
+HsqMSPpblup <- vc[3,1]/sum(vc[,1])
+print(paste0("The narrow-sense heritability for Pod with seed Weight, based on Phenomics BLUP, is ",round(HsqMSPpblup,digits=4)))
+
+# without phenomics
+HsqPBLUP <- mmer(meanSeedpPod~daysToMaturity+plantCount,
+                random=~block+soilSample+g_alias,
+                rcov=~units,
+                data=dat,verbose=FALSE)
+# extract variance components from mmer function
+vc <- summary(HsqPBLUP)$varcomp
+# solve for narrow-sense heritability
+HsqMSPblup <- vc[3,1]/sum(vc[,1])
+print(paste0("The narrow-sense heritability for Pod with seed Weight, based on BLUP, is ",round(HsqMSPblup,digits=4)))
+```
+
+### K-Fold Cross Validation for Line BLUPs (Predictive Ability from K=100)
+Shuffle the lines to avoid any correlations among similarly labeled individuals.
+```{r}
+ndxShuf <- sample(1:dim(dat)[1],) #create a list to shuffle
+
+phenoShuf <- dat[ndxShuf, ] #shuffle phenotype data rows
+
+phenoShuf <- phenoShuf[,c(1:4,24,25,5:23)] #have all numeric columns (traits to be predicted) at end of dataframe
+
+phenoShuf <- phenoShuf[,-c(16:25)] #remove the traits we do not care about predicting to increase the speed of computing (input the column number into c())
+```
+Loop through each phenotype.
+**CAUTION!!! THIS CHUNK WILL TAKE >12 HOURS TO RUN LOCALLY.** Recommended to output and run through command line through external processing/computing. See .r script "commandLine_PhenomicSel.R" for complete usage.
+```{r,eval=FALSE}
+k <- 20 # How many K-partitions are we breaking our data
+predictors <- c("g_alias","block","soilSample","daysToMaturity","plantCount")
+P <- A.mat(HTP) # Phenomics information turned into a phenomics relationship matrix
+LineBLUPs <- list() # empty list to store the line BLUPs for each trait 
+PredAbility <- list() # empty list to store the predictive ability of the model for each trait 
+predStor <- vector(length=length(ndxShuf)) # empty vector to store within the loop each kcv to then be used for calculating predictive ability correlation(predicted,observed)
+
+suppressMessages(print(
+  for (i in 11:ncol(phenoShuf)) {
+ 
+  cnt <- 1:floor(length(ndxShuf)/k) #how many observations per group to be left out 
+  
+  for (j in 1:k){
+    
+    df <- phenoShuf
+    df[cnt,i] <- NA
+    
+    # Fit an PBLUP model using the sommer package
+    mlmm <- mmer(as.formula(paste0(colnames(df)[i],"~daysToMaturity+plantCount")),
+                random=~block+soilSample+vsr(g_alias,Gu=P),
+                rcov=~units,
+                data=df,verbose=TRUE)
+    
+    # KCV predicted values for cnt (the testing set)
+    blups <- data.frame(mlmm$Beta[1,3]+mlmm$U$`u:g_alias`[[1]])
+    colnames(blups) <- "blup"
+    test <- row.names(blups)[match(df[cnt,"g_alias"],row.names(blups))]
+    pull <- blups[match(test,rownames(blups)),]
+    
+    predStor[cnt] <- pull #store the predicted results for cnt
+    
+    cnt <- cnt + floor(length(ndxShuf)/k) #change cnt to next row (genotype's phenotype) to be excluded from analysis
+  }
+  
+  LineBLUPs[[i]] <- predStor
+  PredAbility[[i]] <- cor(predStor,phenoShuf[,i]) #store prediction accuracy by for each trait LMM
+  
+}
+))
+
+#combine the loop lists in to dataframes
+LineBLUPsMLMM <- do.call(cbind,LineBLUPs[11:ncol(phenoShuf)])
+PredAbilityMLMM <- do.call(cbind,PredAbility[11:ncol(phenoShuf)])
+
+#apply phenotype and line names to dataframes
+colnames(LineBLUPsMLMM) <- c(paste0(colnames(phenoShuf[,11:ncol(phenoShuf)]),"_MLmmBLUPKcv"))
+colnames(PredAbilityMLMM) <- c(paste0(colnames(phenoShuf[,11:ncol(phenoShuf)]),"_MLmmPredAKcv"))
+LineBLUPsMLMM <- data.frame(LineBLUPsMLMM)
+LineBLUPsMLMM$g_alias <- c(paste0(phenoShuf$g_alias))
+#LineBLUPsMLMM <- LineBLUPsMLMM %>% arrange(genotype)
+LineBLUPsMLMM <- LineBLUPsMLMM %>% group_by(g_alias) %>% summarize_if(is.numeric,mean,na.rm=TRUE)
+PredAbilityMLMM <- as.data.frame(t(PredAbilityMLMM))
+colnames(PredAbilityMLMM) <- "predictiveAbilityMLMM"
+
+#write.csv(LineBLUPsMLMM,"miniCore/outputs/LineBLUPsMLMM_Phenomics.csv")
+#write.csv(PredAbilityMLMM,"miniCore/outputs/PredAbilityMLMM_Phenomics.csv")
+```
+
+### Line Selection - Predictive Ability Weighting of Rank Sum Index
+Now we move on to perform line selection based on the best linear unbiased predictions for our traits of interest by forming an index, the same way we did above for calculating using linear mixed-model BLUPs, and before that linear mixed-model BLUEs, and before that mean performance. Here is we will be weighting ranks by the predictive ability of the model for a given trait by using the k-fold (k=100) cross validation model predictive ability. This is to adjust the ranking depending on how well that trait can be predicted. These selections are based on a multivariate linear mixed-model using a phenomics relationship matrix to inform our predictions of line performance for yield component traits. 
+```{r}
+# Input the MLMM outputs from command line
+LineBLUPsMLMM <- read.csv("miniCore/outputs/LineBLUPsMLMM_phenomics.csv")
+PredAbilityMLMM <- read.csv("miniCore/outputs/PredAbilityMLMM_phenomics.csv")
+
+LineBLUPsMLMM <- LineBLUPsMLMM %>%
+  mutate(g_alias=dataHTPheno$g_alias[match(genotype,dataHTPheno$genotype)])
+
+# Rank each line for each trait
+blupsRankMLMM <- LineBLUPsMLMM %>% mutate(across(where(is.numeric),rank))
+
+# Do some quick data manipulation
+
+rownames(blupsRankMLMM) <- blupsRankMLMM$g_alias
+blupsRankMLMM <- blupsRankMLMM[,-c(1:2,8)]
+blupsRankMLMM <- blupsRankMLMM[,c(1:5)]
+PredAbilityMLMM <- data.frame(PredAbilityMLMM[,-1])
+
+
+# Weight each ranking by the predictive ability for that trait
+for (i in 1:ncol(blupsRankMLMM)) {
+  num <- PredAbilityMLMM[i,]
+  blupsRankMLMM[,i] <- blupsRankMLMM[,i]*num
+}
+
+blupsRankMLMM$g_alias <- rownames(blupsRankMLMM)
+
+# Selection index: Sum ranks of yield related traits (high rank is best) and subtract days to maturity (low rank is best)
+blupsRankMLMMSum <- blupsRankMLMM %>% 
+  mutate(yieldRankAcc=hundredSeedWeight_MLmmBLUPKcv+podWseedWeight_MLmmBLUPKcv+seedWeight_MLmmBLUPKcv+meanSeedpPod_MLmmBLUPKcv) %>% mutate(rank=rank(desc(yieldRankAcc)))
+
+# Order index by rank (so that the lowest rank is best - higher index means high yield in rapid time)
+blupsRankMLMMSum <- blupsRankMLMMSum[order(blupsRankMLMMSum$rank),]
+
+# Extract the top 10% of lines for the index
+blupsRankMLMMSum$genotype <- rownames(blupsRankMLMMSum)
+selInd <- blupsRankMLMMSum[c(1:(round(.1*nrow(blupsRankMLMMSum)))),c("g_alias","rank")]
+
+# Reintroduce BLUEs of yield related traits
+selIndBlupsMLMM <- merge(selInd,LineBLUPsMLMM,by.x="g_alias")
+selIndBlupsMLMM <- selIndBlupsMLMM[order(selIndBlupsMLMM$rank),c(1:2,4:8)]
+
+# Output table of top 10% of lines
+knitr::kable(selIndBlupsMLMM,caption="Rank Sum Selected Lines (MLMM-Phenomics) - Rapid Yield Accumulation",col.names=c("Genotype","Yield Rank (BLUP)","100 Seed Weight (BLUP)","Weight - Pod & Seed (BLUP)","Weight - Seed (BLUP)","Mean Seeds/Pod (BLUP)","Weight - 10 Pod (BLUP)"))
+```
+### Selection Comparison - LMM Part B versus MLMM-Phenomics
+Only 56% of the same selections are made when the model is informed with phenomics data and run as a multivariate linear mixed-model. Our predictive abilities could be affecting this, as we have changing prediction for certain traits when using phenomics and therefore an individual line that ranked high for a trait with a low predictive ability is no longer selected.
+```{r}
+# Calculate how many selections from BLUE index were also found in the mean index
+length(which(selIndBlupsMLMM$g_alias%in%selIndBlupsLMM$g_alias))
+
+# The names of the lines selected by Rank sum index on BLUE and mean
+selIndBlupsMLMM[selIndBlupsMLMM$g_alias%in%selIndBlupsLMM$g_alias,]["g_alias"]
+```
+
+```{r,fig.height=15,fig.width=15}
+library(ggVennDiagram)
+
+selections <- data.frame(cbind(selIndMeans$g_alias,selIndBlues$g_alias,selIndBlupsLMM$g_alias,selIndBlupsMLMM$g_alias))
+colnames(selections) <- c("Mean","BLUEs","BLUPs","MLMM")
+
+ggVennDiagram(selections,label="count",label_alpha=0,label_size=6) +
+  scale_fill_distiller(palette = "RdBu")
+
+```
+******************************************************
+## (3) Linear Mixed-Model with Genomics (BLUPS for Cross Validation)
+### Data Manipulation
+To easily run (3), we need to conduct some data manipulation. First, we need to convert vcf file to numeric format, then filter out markers and individuals based on proportion of missing data, and then filter markers based on minor allele frequencies. Following this we will be matching the lines in the phenotype dataset to the lines in the genotype dataset. Last, we will be imputing missingness using markov chain.
+```{r}
+# Converting VCF file format to numerical matrix format that can be fit in statistical models
+gt <- extract.gt(vcf, element = "GT", as.numeric = F)
+fix_T <- as_tibble(getFIX(vcf))
+gt2 <- matrix(0, ncol = ncol(gt), nrow = nrow(gt))
+colnames(gt2) <- colnames(gt)
+gt2a <- apply(gt,2, function(x) gsub("1/1","1",x))
+gt2b <- gsub("0[/|]0","0",gt2a)
+gt2c <- gsub("[10][/|][10]","0.5",gt2b)
+gt2d <- gsub("\\.[/|]\\.","NA",gt2c)
+gt2d_num <- apply(gt2d, 2, as.numeric)
+#Adding row names back in
+rownames(gt2d_num) <- rownames(gt2d)
+geno_num <- t(gt2d_num)
+#Remove some of the data objects to open storage space
+rm(gt,gt2,gt2a,gt2b,gt2c,gt2d,gt2d_num,fix_T)
+```
+
+```{r}
+# Filtering out markers on proportion of missing data
+miss <- function(x){length(which(is.na(x)))}
+mrkNA <- (apply(geno_num, MARGIN=2, FUN=miss))/dim(geno_num)[1]
+ndx <- which(mrkNA > 0.5)
+
+if (length(ndx)>0) geno_num2 <- geno_num[, -ndx] else geno_num2 <- geno_num
+```
+
+```{r}
+# Filtering out individuals on proportion of missing data
+indNA <- (apply(geno_num2, MARGIN=1, FUN=miss))/dim(geno_num2)[2]
+ndx2 <- which(indNA > 0.5)
+
+if (length(ndx2)>0) geno_num3 <- geno_num2[-ndx2, ] else geno_num3 <- geno_num2
+```
+
+```{r}
+# Filter markers based on MAF
+maf <- apply(geno_num3, MARGIN=2, FUN=mean, na.rm=T)
+ndx3 <- which(maf<0.05 | maf>0.95) 
+
+if (length(ndx3)>0) geno_num4 <- geno_num3[, -ndx3] else geno_num4 <- geno_num3
+```
+
+```{r}
+pheno <- dat
+# Match line ID between phenotype and genotype, removing some phenotype information of individuals not genotyped
+ndx4 <- match(pheno$g_alias,rownames(geno_num4))
+ndxNA <- which(is.na(ndx4))
+ndx5 <- ndx4[-ndxNA]
+pheno <- pheno[-ndxNA, ]
+ndx6 <- match(rownames(geno_num4),pheno$g_alias)
+ndxNA <- which(is.na(ndx6))
+ndx7 <- ndx6[-ndxNA]
+geno_num4 <- geno_num4[-ndxNA,]
+```
+Impute markers using Markov chain imputation (R package NAM)
+```{r}
+library(NAM)
+impMethod="markov"
+# Impute genotype data using Markov chain implemented in the NAM package
+if (impMethod == "markov") geno_imp <- markov(apply(geno_num4[, -1], 2, as.numeric))
+if (impMethod == "markov") rownames(geno_imp) <- rownames(geno_num4)
+# Remove object for storage space
+rm(geno_num4)
+```
+
+### Linkage Disequilibrium and LD decay
+```{r}
+geno_imp[1:10,1:10]
+markers <- geno_imp
+
+snpID <- data.frame(colnames(geno_imp))
+colnames(snpID) <- "LG:Position"
+snpSplit <- stringr::str_split_fixed(snpID$`LG:Position`,":",2)
+map <- cbind(snpID,snpSplit)
+colnames(map) <- c("Locus","LG","Position")
+map$LG <- gsub("chr.","",map$LG)
+write.csv(map,"miniCore/map.csv")
+write.csv(markers,"miniCore/markers.csv")
+
+
+res <- sommer::LD.decay(markers, map)
+names(res)
+res$by.LG
+```
+
+
+### Model
+Here we are predicting line performance for yield (pod with seed weight). The form of **Model A** is:
+$$ yield_{ijklm} = genotype_i + block_j + soil_k + \beta_{l}maturity_l + \beta_{m}count_m + error_{ijklm}$$
+where the $yield_{ijklm}$ is the predicted value of multivariate linear mixed-model regression of $genotype_i$ informed with SNPs where ${G=K\sigma^2_u}$ is the variance covariance matrix for the random effect $genotype$, from the multivariate normal distribution ${genotype \sim MVN(0,G\sigma^2_u)}$ with ${G}$ being the genomic relationship matrix, $block_j$ is the random effect of the $j$th block with $block_j \sim N(0,\sigma^2_b)$, $soil_k$ is the random effect of the $k$th soil sample with $soil_k \sim N(0,\sigma^2_s)$, $maturity_l$ where $\beta_{l}$ tells us the fixed effect of the days to maturity on yield, and $count_m$ where $\beta_{c}$ tells us the fixed effect of the number of plants in a plot on yield.
+
+```{r,results='hide'}
+G <- sommer::A.mat(geno_imp)
+
+mlmm3a <- mmer(podWseedWeight~daysToMaturity+plantCount,
+                random=~block+soilSample+vsr(g_alias,Gu=G),
+                rcov=~units,
+                data=pheno,verbose=FALSE)
+summary(mlmm3a)
+#mlmm3a$Beta[1,3]+mlmm3a$U$`u:g_alias`$podWseedWeight #output BLUPs if need
+```
+
+### Heritability of traits with and without genomics
+Narrow-sense heritability of these yield component traits is computed by taking the variance of the phenotype attributed to the line and dividing by the residual variances in the model. As will be seen below, using genomics data in the model is increasing heritability to near perfect, suggesting overfitting of the model. See this link: https://www.ncbi.nlm.nih.gov/pmc/articles/PMC5651917/ to understand how to account for this. This link is justification for using cross-validation for realistic approximations of heritability and predictive ability of models. 
+
+100-Seed Weight
+```{r}
+# with phenomics
+HsqGBLUP <- mmer(hundredSeedWeight~daysToMaturity+plantCount,
+                random=~block+soilSample+vsr(g_alias,Gu=G),
+                rcov=~units,
+                data=pheno,verbose=FALSE)
+# extract variance components from mmer function
+vc <- summary(HsqGBLUP)$varcomp
+# solve for narrow-sense heritability
+HsqHSWgblup <- vc[3,1]/sum(vc[,1])
+print(paste0("The narrow-sense heritability for 100-Seed Weight, based on Genomics BLUP, is ",round(HsqHSWgblup,digits=4)))
+
+# without phenomics
+HsqBLUP <- mmer(hundredSeedWeight~daysToMaturity+plantCount,
+                random=~block+soilSample+g_alias,
+                rcov=~units,
+                data=pheno,verbose=FALSE)
+# extract variance components from mmer function
+vc <- summary(HsqBLUP)$varcomp
+# solve for narrow-sense heritability
+HsqHSWblup <- vc[3,1]/sum(vc[,1])
+print(paste0("The narrow-sense heritability for 100-Seed Weight, based on BLUP, is ",round(HsqHSWblup,digits=4)))
+```
+
+Pod with Seed Weight
+```{r}
+# with phenomics
+HsqGBLUP <- mmer(podWseedWeight~daysToMaturity+plantCount,
+                random=~block+soilSample+vsr(g_alias,Gu=G),
+                rcov=~units,
+                data=pheno,verbose=FALSE)
+# extract variance components from mmer function
+vc <- summary(HsqGBLUP)$varcomp
+# solve for narrow-sense heritability
+HsqPSWgblup <- vc[3,1]/sum(vc[,1])
+print(paste0("The narrow-sense heritability for Pod with Seed Weight, based on Genomics BLUP, is ",round(HsqPSWgblup,digits=4)))
+
+# without phenomics
+HsqBLUP <- mmer(podWseedWeight~daysToMaturity+plantCount,
+                random=~block+soilSample+g_alias,
+                rcov=~units,
+                data=pheno,verbose=FALSE)
+# extract variance components from mmer function
+vc <- summary(HsqBLUP)$varcomp
+# solve for narrow-sense heritability
+HsqPSWblup <- vc[3,1]/sum(vc[,1])
+print(paste0("The narrow-sense heritability for Pod with Seed Weight, based on BLUP, is ",round(HsqPSWblup,digits=4)))
+```
+
+Mean seeds per pod
+```{r}
+# with phenomics
+HsqGBLUP <- mmer(meanSeedpPod~daysToMaturity+plantCount,
+                random=~block+soilSample+vsr(g_alias,Gu=G),
+                rcov=~units,
+                data=pheno,verbose=FALSE)
+# extract variance components from mmer function
+vc <- summary(HsqGBLUP)$varcomp
+# solve for narrow-sense heritability
+HsqMSPgblup <- vc[3,1]/sum(vc[,1])
+print(paste0("The narrow-sense heritability for Mean seeds per pod, based on Genomics BLUP, is ",round(HsqMSPgblup,digits=4)))
+
+# without phenomics
+HsqBLUP <- mmer(meanSeedpPod~daysToMaturity+plantCount,
+                random=~block+soilSample+g_alias,
+                rcov=~units,
+                data=pheno,verbose=FALSE)
+# extract variance components from mmer function
+vc <- summary(HsqBLUP)$varcomp
+# solve for narrow-sense heritability
+HsqMSPblup <- vc[3,1]/sum(vc[,1])
+print(paste0("The narrow-sense heritability for Mean seeds per pod, based on BLUP, is ",round(HsqMSPblup,digits=4)))
+```
+
+### K-Fold Cross Validation for Line BLUPs (Predictive Ability from K=100)
+Shuffle the lines to avoid any correlations among similarly labeled individuals.
+```{r}
+ndxShuf <- sample(1:dim(pheno)[1],) #create a list to shuffle
+phenoShuf <- pheno[ndxShuf, ] #shuffle phenotype data rows
+phenoShuf <- phenoShuf[,c(1:4,24,25,5:23)] #have all numeric columns (traits to be predicted) at end of dataframe
+phenoShuf <- phenoShuf[,-c(16:25)] #remove the traits we do not care about predicting to increase the speed of computing (input the column number into c())
+phenoShuf <- droplevels(phenoShuf)
+```
+Loop through each phenotype.
+**CAUTION!!! THIS CHUNK WILL TAKE >12 HOURS TO RUN LOCALLY.** Recommended to output and run through command line through external processing/computing. See .r script "commandLine_GenomicSel.R" for complete usage to input to anaconda r environment.
+```{r,eval=FALSE}
+k <- 146 # How many K-partitions are we breaking our data (73 or 146 are the options because the nrow(pheno) must be cleanly divisible)
+predictors <- c("g_alias","block","soilSample","daysToMaturity","plantCount")
+G <- sommer::A.mat(geno_imp) # genomics information turned into a genomics relationship matrix
+LineBLUPs <- list() # empty list to store the line BLUPs for each trait 
+PredAbility <- list() # empty list to store the predictive ability of the model for each trait 
+predStor <- vector(length=length(ndxShuf)) # empty vector to store within the loop each kcv to then be used for calculating predictive ability correlation(predicted,observed)
+
+library(sommer)
+suppressMessages(print(
+  for (i in 11:ncol(phenoShuf)) {
+    
+    cnt <- 1:floor(length(ndxShuf)/k) #how many observations per group to be left out 
+    
+    for (j in 1:k){
+      
+      df <- phenoShuf
+      df[cnt,i] <- NA
+      
+      # Fit an PBLUP model using the sommer package
+      mlmm <- mmer(as.formula(paste0(colnames(df)[i],"~daysToMaturity+plantCount")),
+                   random=~block+soilSample+vsr(g_alias,Gu=G),
+                   rcov=~units,
+                   data=df,verbose=TRUE)
+      
+      # KCV predicted values for cnt (the testing set)
+      blups <- data.frame(mlmm$Beta[1,3]+mlmm$U$`u:g_alias`[[1]])
+      colnames(blups) <- "blup"
+      test <- row.names(blups)[match(df[cnt,"g_alias"],row.names(blups))]
+      pull <- blups[match(test,rownames(blups)),]
+      
+      predStor[cnt] <- pull #store the predicted results for cnt
+      
+      cnt <- cnt + floor(length(ndxShuf)/k) #change cnt to next row (genotype's phenotype) to be excluded from analysis
+    }
+    
+    LineBLUPs[[i]] <- predStor
+    PredAbility[[i]] <- cor(predStor,phenoShuf[,i]) #store prediction accuracy by for each trait LMM
+    
+  }
+))
+
+#combine the loop lists in to dataframes
+LineGBLUPsMLMM <- do.call(cbind,LineBLUPs[11:ncol(phenoShuf)])
+PredAbilityMLMM_genomic <- do.call(cbind,PredAbility[11:ncol(phenoShuf)])
+
+#apply phenotype and line names to dataframes
+colnames(LineGBLUPsMLMM) <- c(paste0(colnames(phenoShuf[,11:ncol(phenoShuf)]),"_GBLUPKcv"))
+colnames(PredAbilityMLMM_genomic) <- c(paste0(colnames(phenoShuf[,11:ncol(phenoShuf)]),"_GPredAKcv"))
+LineGBLUPsMLMM <- data.frame(LineGBLUPsMLMM)
+LineGBLUPsMLMM$g_alias <- c(paste0(phenoShuf$g_alias))
+#LineBLUPsMLMM <- LineBLUPsMLMM %>% arrange(genotype)
+LineGBLUPsMLMM <- LineGBLUPsMLMM %>% group_by(g_alias) %>% summarize_if(is.numeric,mean,na.rm=TRUE)
+PredAbilityMLMM_genomic <- as.data.frame(t(PredAbilityMLMM_genomic))
+colnames(PredAbilityMLMM_genomic) <- "predictiveAbilityMLMM_genomic"
+
+#write.csv(LineGBLUPsMLMM,"miniCore/outputs/LineBLUPsMLMM_Genomics.csv")
+#write.csv(PredAbilityMLMM_genomic,"miniCore/outputs/PredAbilityMLMM_Genomics.csv")
+```
+
+### Line Selection - Predictive Ability Weighting of Rank Sum Index
+Now we move on to perform line selection based on the best linear unbiased predictions for our traits of interest by forming an index from genomic prediction (MLMM GBLUP), the same way we did above for calculating using MLMM PBLUPS, and before that linear mixed-model BLUPs, and before that linear mixed-model BLUEs, and before that mean performance. Here is we will be weighting ranks by the predictive ability of the model for a given trait by using the k-fold (k=146) cross validation model predictive ability. This is to adjust the ranking depending on how well that trait can be predicted. These selections are based on a multivariate linear mixed-model using a genomics relationship matrix to inform our predictions of line performance for yield component traits. 
+```{r}
+# Input the MLMM outputs from command line
+LineBLUPsMLMM_genomics <- read.csv("miniCore/outputs/LineBLUPsMLMM_Genomics.csv")
+PredAbilityMLMM_genomics <- read.csv("miniCore/outputs/PredAbilityMLMM_Genomics.csv")
+
+LineBLUPsMLMM_genomics <- LineBLUPsMLMM_genomics %>% 
+  mutate(g_alias=dataHTPheno$g_alias[match(genotype,dataHTPheno$genotype)]) 
+
+# Rank each line for each trait
+gblupsRankMLMM <- LineBLUPsMLMM_genomics %>% mutate(across(where(is.numeric),rank))
+
+# Do some quick data manipulation
+rownames(gblupsRankMLMM) <- gblupsRankMLMM$g_alias
+gblupsRankMLMM <- gblupsRankMLMM[,-c(1:2,8)]
+rownames(PredAbilityMLMM_genomics) <- PredAbilityMLMM_genomics$X
+PredAbilityMLMM_genomics <- data.frame(PredAbilityMLMM_genomics[,-1])
+
+
+# Weight each ranking by the predictive ability for that trait
+for (i in 1:ncol(gblupsRankMLMM)) {
+  num <- PredAbilityMLMM_genomics[i,]
+  gblupsRankMLMM[,i] <- gblupsRankMLMM[,i]*num
+}
+
+gblupsRankMLMM$g_alias <- rownames(gblupsRankMLMM)
+
+# Selection index: Sum ranks of yield related traits (high rank is best) and subtract days to maturity (low rank is best)
+gblupsRankMLMMSum <- gblupsRankMLMM %>% 
+  mutate(yieldRankAcc=hundredSeedWeight_GBLUPKcv+podWseedWeight_GBLUPKcv+seedWeight_GBLUPKcv+meanSeedpPod_GBLUPKcv) %>% mutate(rank=rank(desc(yieldRankAcc)))
+
+# Order index by rank (so that the lowest rank is best - higher index means high yield in rapid time)
+gblupsRankMLMMSum <- gblupsRankMLMMSum[order(gblupsRankMLMMSum$rank),]
+
+# Extract the top 10% of lines for the index
+gblupsRankMLMMSum$genotype <- rownames(gblupsRankMLMMSum)
+selInd <- gblupsRankMLMMSum[c(1:30),c("g_alias","rank")]
+
+# Reintroduce BLUEs of yield related traits
+selIndGBlupsMLMM <- merge(selInd,LineBLUPsMLMM_genomics,by.x="g_alias")
+selIndGBlupsMLMM <- selIndGBlupsMLMM[order(selIndGBlupsMLMM$rank),c(1:2,4:8)]
+
+# Output table of top 10% of lines
+knitr::kable(selIndGBlupsMLMM,caption="Rank Sum Selected Lines (MLMM-Phenomics) - Rapid Yield Accumulation",col.names=c("Genotype","Yield Rank (BLUP)","100 Seed Weight (BLUP)","Weight - Pod & Seed (BLUP)","Weight - Seed (BLUP)","Mean Seeds/Pod (BLUP)","Weight - 10 Pod (BLUP)"))
+```
+### Selection Comparison - MLMM-Phenomics versus MLMM-Genomics
+
+```{r}
+# Calculate how many selections from BLUE index were also found in the mean index
+length(which(selIndBlupsMLMM$g_alias%in%selIndGBlupsMLMM$g_alias))
+
+# The names of the lines selected by Rank sum index on BLUE and mean
+selIndBlupsMLMM[selIndBlupsMLMM$g_alias%in%selIndGBlupsMLMM$g_alias,]["g_alias"]
+```
+
+```{r,fig.height=15,fig.width=15}
+library(ggVennDiagram)
+
+selections <- data.frame(cbind(selIndBlupsLMM$g_alias,selIndBlupsMLMM$g_alias,selIndGBlupsMLMM$g_alias))
+colnames(selections) <- c("LMM BLUPs","MLMM PBLUPs","MLMM GBLUPs")
+
+ggVennDiagram(selections,label="count",label_alpha=0,label_size=6) +
+  scale_fill_distiller(palette = "RdBu")
+
+```
+
+## (4) Linear Mixed-Model with Genomics and Phenomics (BLUPS for Cross Validation)
+### Data Manipulation
+There is not much data manipulation required here. Only caveat is SNPs ID of lines uses g_alias, therefore, we need to convert the row/column names in phenomics matrix (P) to g_alias from genotype. We also need to subset P matrix to remove individuals which were not genotyped. After this we can fit a model to test.
+```{r}
+### Phenomics Data Processing
+# Change format of phenomics data to long format
+library(dplyr)
+longHTP <- dataHTPheno %>% 
+  group_by(g_alias,day) %>% 
+  summarise_if(is.numeric, mean, na.rm = TRUE)
+l <- reshape(longHTP,                    # data
+             direction = "long",
+             idvar= c("g_alias","day"),# long or wide
+             varying = c(3:ncol(longHTP)),# the columns that should be stacked
+             v.names = "value",
+             timevar = "HTP", # name of "time" variable, basically groups
+             times = names(longHTP)[3:ncol(longHTP)])
+# create a new column as a combination of the day and the HTP trait (basically a phenomics SNP)
+l$day_HTP <- paste("day",l$day,"_",l$HTP,sep="")
+# create a matrix of genotype (rows) by day/HTP trait (columns) to be used in MLMM
+Pmatrix <- tapply(l$value, l[c(1,3)], FUN = mean)
+```
+
+```{r}
+### Genomics Data Processing
+# Converting VCF file format to numerical matrix format that can be fit in statistical models
+gt <- extract.gt(vcf, element = "GT", as.numeric = F)
+fix_T <- as_tibble(getFIX(vcf))
+gt2 <- matrix(0, ncol = ncol(gt), nrow = nrow(gt))
+colnames(gt2) <- colnames(gt)
+gt2a <- apply(gt,2, function(x) gsub("1/1","1",x))
+gt2b <- gsub("0[/|]0","0",gt2a)
+gt2c <- gsub("[10][/|][10]","0.5",gt2b)
+gt2d <- gsub("\\.[/|]\\.","NA",gt2c)
+gt2d_num <- apply(gt2d, 2, as.numeric)
+#Adding row names back in
+rownames(gt2d_num) <- rownames(gt2d)
+geno_num <- t(gt2d_num)
+#Remove some of the data objects to open storage space
+rm(gt,gt2,gt2a,gt2b,gt2c,gt2d,gt2d_num,fix_T)
+
+# Filtering out markers on proportion of missing data
+miss <- function(x){length(which(is.na(x)))}
+mrkNA <- (apply(geno_num, MARGIN=2, FUN=miss))/dim(geno_num)[1]
+ndx <- which(mrkNA > 0.5)
+
+if (length(ndx)>0) geno_num2 <- geno_num[, -ndx] else geno_num2 <- geno_num
+
+# Filtering out individuals on proportion of missing data
+indNA <- (apply(geno_num2, MARGIN=1, FUN=miss))/dim(geno_num2)[2]
+ndx2 <- which(indNA > 0.5)
+
+if (length(ndx2)>0) geno_num3 <- geno_num2[-ndx2, ] else geno_num3 <- geno_num2
+
+# Filter markers based on MAF
+maf <- apply(geno_num3, MARGIN=2, FUN=mean, na.rm=T)
+ndx3 <- which(maf<0.05 | maf>0.95) 
+
+if (length(ndx3)>0) geno_num4 <- geno_num3[, -ndx3] else geno_num4 <- geno_num3
+```
+
+```{r}
+### Matching Genotype names between all data
+pheno <- dat
+ndx4 <- match(pheno$g_alias,rownames(geno_num4))
+ndxNA <- which(is.na(ndx4))
+ndx5 <- ndx4[-ndxNA]
+pheno <- pheno[-ndxNA, ]
+ndx6 <- match(rownames(Pmatrix),rownames(geno_num4))
+ndxNA <- which(is.na(ndx6))
+ndx7 <- ndx6[-ndxNA]
+Pmatrix <- Pmatrix[-ndxNA,]
+ndx8 <- match(rownames(geno_num4),rownames(Pmatrix))
+ndxNA <- which(is.na(ndx8))
+ndx9 <- ndx8[-ndxNA]
+geno_num4 <- geno_num4[-ndxNA,]
+```
+
+```{r}
+### Marker imputation, dataset shuffling, shuffling match
+library(NAM)
+impMethod="markov"
+# Impute genotype data using Markov chain implemented in the NAM package
+if (impMethod == "markov") geno_imp <- markov(apply(geno_num4[, -1], 2, as.numeric))
+if (impMethod == "markov") rownames(geno_imp) <- rownames(geno_num4)
+# Remove object for storage space
+rm(geno_num4)
+
+# Shuffle lines to avoid correlated individuals in same k sets
+ndxShuf <- sample(1:dim(pheno)[1],) #create a list to shuffle
+phenoShuf <- pheno[ndxShuf, ] #shuffle phenotype data rows
+phenoShuf <- phenoShuf[,c(1:4,24,25,5:23)] #have all numeric columns (traits to be predicted) at end of dataframe
+phenoShuf <- phenoShuf[,-c(16:25)] #remove the traits we do not care about predicting to increase the speed of computing (input the column number into c())
+phenoShuf <- droplevels(phenoShuf)
+
+```
+
+```{r}
+### Matrices for prediction
+# create a matrix of genotype (rows) by SNPs (columns) to be used in MLMM
+geno_imp <- geno_imp[order(match(rownames(geno_imp),rownames(Pmatrix))),]
+# combine matrices
+PGmatrix <- cbind(Pmatrix,geno_imp,by="row.names",all=TRUE)
+class(PGmatrix) <- "numeric"
+# create relationship matrices from different data
+P <- sommer::A.mat(Pmatrix) # Phenomics information turned into a phenomic relationship matrix
+G <- sommer::A.mat(geno_imp) # Genomics information turned into a genomic relationship matrix
+PG <- sommer::A.mat(PGmatrix) # Genomics information (SNPs) with Phenomics information turned into a genomic and phenomic relationship matrix
+```
+
+### Model
+Here we are predicting line performance for yield (pod with seed weight). The form of **Model A** is:
+$$ yield_{ipjklm} = genotype_{ip} + block_j + soil_k + \beta_{l}maturity_l + \beta_{m}count_m + error_{ipjklm}$$
+where the $yield_{ijklm}$ is the predicted value of multivariate linear mixed-model regression of $genotype_{ip}$ informed with SNPs where ${G=K\sigma^2_u}$ is the variance covariance matrix for the random effect $genotype$, from the multivariate normal distribution ${genotype \sim MVN(0,G\sigma^2_u)}$ with ${G}$ being the genomic relationship matrix and informed with all phenomics readings where ${HTP=P\sigma^2_u}$ is the variance covariance matrix for the random effect $genotype$, from the multivariate normal distribution ${genotype \sim MVN(0,P\sigma^2_u)}$ with ${P}$ being the phenomic relationship matrix, $block_j$ is the random effect of the $j$th block with $block_j \sim N(0,\sigma^2_b)$, $soil_k$ is the random effect of the $k$th soil sample with $soil_k \sim N(0,\sigma^2_s)$, $maturity_l$ where $\beta_{l}$ tells us the fixed effect of the days to maturity on yield, and $count_m$ where $\beta_{c}$ tells us the fixed effect of the number of plants in a plot on yield.
+
+```{r,results='hide'}
+mlmm4a <- mmer(podWseedWeight~daysToMaturity+plantCount,
+                random=~block+soilSample+vsr(g_alias,Gu=P)+vsr(g_alias,Gu=G),
+                rcov=~units,
+                data=pheno,verbose=TRUE)
+
+print(paste0("P-MLMM AIC ",mlmm2b$AIC))
+print(paste0("G-MLMM AIC ",mlmm3a$AIC))
+print(paste0("P&G-MLMM AIC ",mlmm4a$AIC))
+print("WOAH!!! This is a serious improvement of model performance by combination of omics data.")
+
+#mlmm4a$Beta[1,3]+mlmm4a$U$`u:g_alias`$podWseedWeight #output BLUPs if need
+```
+
+Loop through each phenotype.
+**CAUTION!!! THIS CHUNK WILL TAKE >12 HOURS TO RUN LOCALLY.** Recommended to output and run through command line through external processing/computing. See .r script "commandLine_PhenomicGenomicSel.R" for complete usage to input to anaconda r environment.
+```{r,eval=FALSE}
+### Cross-Validation Phenomics and Genomics MLMM Prediction
+k <- 97 # How many K-partitions are we breaking our data (97 are the options because the nrow(pheno) must be cleanly divisible)
+predictors <- c("genotype","block","soilSample","daysToMaturity","plantCount")
+LineBLUPs <- list() # empty list to store the line BLUPs for each trait 
+PredAbility <- list() # empty list to store the predictive ability of the model for each trait 
+predStor <- vector(length=length(ndxShuf)) # empty vector to store within the loop each kcv to then be used for calculating predictive ability correlation(predicted,observed)
+
+library(sommer)
+  for (i in 11:ncol(phenoShuf)) {
+    
+    cnt <- 1:floor(length(ndxShuf)/k) #how many observations per group to be left out 
+    
+    for (j in 1:k){
+      
+      df <- phenoShuf
+      df[cnt,i] <- NA
+      
+      # Fit an PBLUP model using the sommer package
+      mlmm <- mmer(as.formula(paste0(colnames(df)[i],"~daysToMaturity+plantCount")),
+                   random=~block+soilSample+vsr(g_alias,Gu=P)+vsr(g_alias,Gu=G),
+                   rcov=~units,
+                   data=df,verbose=TRUE)
+      
+      # KCV predicted values for cnt (the testing set)
+      blups <- data.frame(mlmm$Beta[1,3]+mlmm$U$`u:g_alias`[[1]])
+      colnames(blups) <- "blup"
+      test <- row.names(blups)[match(df[cnt,"g_alias"],row.names(blups))]
+      pull <- blups[match(test,rownames(blups)),]
+      
+      predStor[cnt] <- pull #store the predicted results for cnt
+      
+      cnt <- cnt + floor(length(ndxShuf)/k) #change cnt to next row (genotype's phenotype) to be excluded from analysis
+    }
+    
+    LineBLUPs[[i]] <- predStor
+    PredAbility[[i]] <- cor(predStor,phenoShuf[,i]) #store prediction accuracy by for each trait LMM
+    
+  }
+
+library(dplyr)
+#combine the loop lists in to dataframes
+LinePGBLUPsMLMM <- do.call(cbind,LineBLUPs[11:ncol(phenoShuf)])
+PredAbilityMLMM_phenomicgenomic <- do.call(cbind,PredAbility[11:ncol(phenoShuf)])
+
+#apply phenotype and line names to dataframes
+colnames(LinePGBLUPsMLMM) <- c(paste0(colnames(phenoShuf[,11:ncol(phenoShuf)]),"_PGBLUPKcv"))
+colnames(PredAbilityMLMM_phenomicgenomic) <- c(paste0(colnames(phenoShuf[,11:ncol(phenoShuf)]),"_PGPredAKcv"))
+LinePGBLUPsMLMM <- data.frame(LinePGBLUPsMLMM)
+LinePGBLUPsMLMM$genotype <- c(paste0(phenoShuf$genotype))
+#LineBLUPsMLMM <- LineBLUPsMLMM %>% arrange(genotype)
+LinePGBLUPsMLMM <- LinePGBLUPsMLMM %>% group_by(genotype) %>% summarize_if(is.numeric,mean,na.rm=TRUE)
+PredAbilityMLMM_phenomicgenomic <- as.data.frame(t(PredAbilityMLMM__phenomicgenomic))
+colnames(PredAbilityMLMM_phenomicgenomic) <- "predictiveAbilityMLMM__phenomicgenomic"
+
+#write.csv(LinePGBLUPsMLMM,"miniCore/outputs/LineBLUPsMLMM_PhenomicsGenomics.csv")
+#write.csv(PredAbilityMLMM_phenomicgenomic,"miniCore/outputs/PredAbilityMLMM_PhenomicsGenomics.csv")
+
+```
+
+### Line Selection - Predictive Ability Weighting of Rank Sum Index
+Now we move on to perform line selection based on the best linear unbiased predictions for our traits of interest by forming an index from phenomics and from genomics for prediction (MLMM PGBLUP), the same way we did above for calculating using MLMM PBLUPS and GBLUPs, and before that linear mixed-model BLUPs, and before that linear mixed-model BLUEs, and before that mean performance. Here is we will be weighting ranks by the predictive ability of the model for a given trait by using the k-fold (k=146) cross validation model predictive ability. This is to adjust the ranking depending on how well that trait can be predicted. These selections are based on a multivariate linear mixed-model using a genomics relationship matrix to inform our predictions of line performance for yield component traits. 
+```{r}
+# Input the MLMM outputs from command line
+LineBLUPsMLMM_phenomicsgenomics <- read.csv("miniCore/outputs/LineBLUPsMLMM_PhenomicsGenomics.csv")
+PredAbilityMLMM_phenomicsgenomics <- read.csv("miniCore/outputs/PredAbilityMLMM_PhenomicsGenomics.csv")
+# Rank each line for each trait
+pgblupsRankMLMM <- LineBLUPsMLMM_phenomicsgenomics %>% mutate(across(where(is.numeric),rank))
+
+# Do some quick data manipulation
+rownames(pgblupsRankMLMM) <- pgblupsRankMLMM$g_alias
+pgblupsRankMLMM <- pgblupsRankMLMM[,-c(1:2)]
+rownames(PredAbilityMLMM_phenomicsgenomics) <- PredAbilityMLMM_phenomicsgenomics$X
+PredAbilityMLMM_phenomicsgenomics <- data.frame(PredAbilityMLMM_phenomicsgenomics[,-1])
+
+
+# Weight each ranking by the predictive ability for that trait
+for (i in 1:ncol(pgblupsRankMLMM)) {
+  num <- PredAbilityMLMM_phenomicsgenomics[i,]
+  pgblupsRankMLMM[,i] <- pgblupsRankMLMM[,i]*num
+}
+
+pgblupsRankMLMM$g_alias <- rownames(pgblupsRankMLMM)
+
+# Selection index: Sum ranks of yield related traits (high rank is best) and subtract days to maturity (low rank is best)
+pgblupsRankMLMMSum <- pgblupsRankMLMM %>% 
+  mutate(yieldRankAcc=hundredSeedWeight_PGBLUPKcv+podWseedWeight_PGBLUPKcv+seedWeight_PGBLUPKcv+meanSeedpPod_PGBLUPKcv) %>% mutate(rank=rank(desc(yieldRankAcc)))
+
+# Order index by rank (so that the lowest rank is best - higher index means high yield in rapid time)
+pgblupsRankMLMMSum <- pgblupsRankMLMMSum[order(pgblupsRankMLMMSum$rank),]
+
+# Extract the top 10% of lines for the index
+pgblupsRankMLMMSum$genotype <- rownames(pgblupsRankMLMMSum)
+selInd <- pgblupsRankMLMMSum[c(1:30),c("g_alias","rank")]
+
+# Reintroduce BLUEs of yield related traits
+selIndPGBlupsMLMM <- merge(selInd,LineBLUPsMLMM_phenomicsgenomics,by.x="g_alias")
+selIndPGBlupsMLMM <- selIndPGBlupsMLMM[order(selIndPGBlupsMLMM$rank),c(1:2,4:8)]
+
+# Output table of top 10% of lines
+knitr::kable(selIndPGBlupsMLMM,caption="Rank Sum Selected Lines (MLMM-Phenomics) - Rapid Yield Accumulation",col.names=c("Genotype","Yield Rank (BLUP)","100 Seed Weight (BLUP)","Weight - Pod & Seed (BLUP)","Weight - Seed (BLUP)","Mean Seeds/Pod (BLUP)","Weight - 10 Pod (BLUP)"))
+```
+### Selection Comparison - MLMM-Phenomics versus MLMM-Genomics
+
+```{r}
+# Calculate how many selections from PGBLUPs index were also found in the GBLUPs index
+length(which(selIndPGBlupsMLMM$g_alias%in%selIndGBlupsMLMM$g_alias))
+
+# The names of the lines selected by Rank sum index on PGBLUPs and GBLUPs
+selIndPGBlupsMLMM[selIndPGBlupsMLMM$g_alias%in%selIndGBlupsMLMM$g_alias,]["g_alias"]
+
+# Calculate how many selections from PGBLUPs index were also found in the PBLUPs index
+length(which(selIndPGBlupsMLMM$g_alias%in%selIndBlupsMLMM$g_alias))
+
+# The names of the lines selected by Rank sum index on PGBLUPs and PBLUPs
+selIndPGBlupsMLMM[selIndPGBlupsMLMM$g_alias%in%selIndBlupsMLMM$g_alias,]["g_alias"]
+```
+
+```{r,fig.height=15,fig.width=15}
+library(ggVennDiagram)
+
+selections <- data.frame(cbind(selIndBlupsLMM$g_alias,selIndBlupsMLMM$g_alias,selIndGBlupsMLMM$g_alias,selIndPGBlupsMLMM$g_alias))
+colnames(selections) <- c("BLUP","pBLUP","gBLUP","pgBLUP")
+
+ggVennDiagram(selections,label="count",label_alpha=0,label_size=6) +
+  scale_fill_distiller(palette = "RdBu") +
+  labs(title="Intersecting BLUP Line Selections") +
+  theme(legend.key.size = unit(1, 'cm'),
+        legend.title = element_text(size=14),
+        legend.text = element_text(size=12),
+        title = element_text(size=16)) 
+```
+# Outputs for Presentation
+### Predictive ability and trait heritability plot
+```{r}
+predData <- read.csv("miniCore/outputs/predAbility.csv")
+predDataLong <- gather(predData,variable,value,BLUP.r2:h2,factor_key=TRUE)
+
+labels <- c("BLUP.r2","pBLUP.r2","gBLUP.r2","pgBLUP.r2","h2")
+colors <- c("BLUP.r2"="#CC79A7","pBLUP.r2"="#56B4E9","gBLUP.r2"="#009E73","pgBLUP.r2"="#D55E00","h2"="#999999")
+xlabels <- c('100-Seed Weight','Mean seeds/pod','Total Weight \n (pod w/ seed)','Total Weight \n (seed)','Weight \n (10 pods w/ seed)')
+
+ggplot(predDataLong, aes(fill=variable,y=value,x=Trait)) + 
+  geom_bar(position="dodge", stat="identity") +
+  theme(axis.text.x = element_text(angle = 45, hjust=1)) +
+  #scale_fill_hue(l=40, c=35) +
+  labs(x="Trait of Interest",y="Value",title="Model Predictive Ability and Trait Heritability") +
+  scale_x_discrete(labels=xlabels) +
+  scale_fill_manual(name="Variable",values=colors,breaks=labels) +
+  theme(panel.background = element_rect(fill='white', color = 'black'),
+        panel.grid.major = element_line(color = 'black', linetype = 'dotted'),
+        axis.text.x = element_text(size = 14),
+        axis.text.y = element_text(size = 14),
+        axis.title.x = element_text(size = 16),
+        axis.title.y = element_text(size = 16),
+        legend.title = element_text(size=16),
+        legend.text = element_text(size=14),
+        title = element_text(size=18))
+
+```
+
+### Selections Table
+```{r}
+selections <- data.frame(cbind(selIndBlupsLMM$g_alias,selIndBlupsMLMM$g_alias,selIndGBlupsMLMM$g_alias,selIndPGBlupsMLMM$g_alias))
+colnames(selections) <- c("BLUP","pBLUP","gBLUP","pgBLUP")
+selections$Rank <- rep(1:nrow(selections))
+selections <- selections[,c(5,1:4)]
+#write.csv(selections,"miniCore/outputs/lineSelections.csv")
+
+common <- Reduce(intersect, list(selections$BLUP,selections$pBLUP,selections$gBLUP,selections$pgBLUP))
+library(knitr)
+library(kableExtra)
+library(tidyverse)
+library(magrittr)
+selections %>% 
+  mutate_all(~cell_spec(.x, color = ifelse(.x %in% common, "red","black"))) %>% 
+  knitr::kable(escape=FALSE) %>% 
+  kable_styling()
+
+# Output table of top 10% of lines from miniCore
+knitr::kable(selections,caption="Selected Lines by Model Type",col.names=c("Rank","LMM BLUP","Phenomics BLUP","Genomics BLUP","Phenomics and Genomics BLUP"),align=rep('c', 5))%>%
+  kableExtra::kable_styling(position = "center")
+
+```
+
+# Multi-Environment Trials - Genotype x Environment Interactions
+### Data Manipulation
+Here we need to input the data we are interested in. I have chosen 100-seed weight (100SW), days to 50% pod maturity (DM), days to 50% flowering (50DF), plant height while flowering (PH), pod length (PL), average number of pods per plant (PodPerPlant), average seed weight per pod (SeedPerPod), average seed yield per plant (SeedYieldplant), and yield (Yield). These were chosen because of their high representation through trial locations and years, with many of them being collected over multiple years and greater than 6 locations. 
+```{r}
+# read in datasets
+WorkDir <- "C:/Users/natha/OneDrive/Desktop/UH_Manoa/PhD/SideProjects/WorldVeg/MungBean"
+setwd(WorkDir)
+multiEnvLong <- readxl::read_xlsx("miniCore/MB_Pangenome_trait.xlsx",sheet="this")
+vcf <- read.vcfR("miniCore/MMC_MAF005.vcf.gz", verbose = FALSE) # vcf of genomics (SNP) dataset
+# check data for duplicated information -> go back to .xlsx file to remove duplicates through filtering
+multiEnvLong %>%
+    dplyr::group_by(no, g_alias, country, location, year, replication, trait) %>%
+    dplyr::summarise(n = dplyr::n(), .groups = "drop") %>%
+    dplyr::filter(n > 1L)
+# shift the data set from long format to wide format so we have both types to use depending on task
+multiEnvWide <- multiEnvLong %>% 
+  pivot_wider(
+  id_cols = c(no,g_alias,country,location,year,replication),
+  names_from = trait,
+  values_from = value)
+# set appropriate data format for the columns
+multiEnvWide[c(7:15)] <- suppressWarnings(sapply(multiEnvWide[c(7:15)],as.numeric))
+multiEnvWide$no <- as.factor(multiEnvWide$no)
+multiEnvWide$g_alias <- as.factor(multiEnvWide$g_alias)
+multiEnvWide$country <- as.factor(multiEnvWide$country)
+multiEnvWide$location <- as.factor(multiEnvWide$location)
+multiEnvWide$year <- as.factor(multiEnvWide$year)
+multiEnvWide$replication <- as.factor(multiEnvWide$replication)
+# proportion of missingness from each column in the dataframe
+sapply(multiEnvWide, function(x) sum(is.na(x))/nrow(multiEnvWide))
+```
+
+### Summary Statistics
+```{r}
+multiEnvCountry <- suppressWarnings(multiEnvWide %>% group_by(country) %>%
+  summarise(across(where(is.numeric), .fns = 
+                     list(min = min,
+                          q25 = ~quantile(., 0.25,na.rm=TRUE),
+                          median = median,
+                          q75 = ~quantile(., 0.75,na.rm=TRUE),
+                          max = max,
+                          mean = mean,
+                          stdev = sd),na.rm=TRUE)) %>%
+  pivot_longer(!country,names_sep='_',names_to=c('variable','.value')) %>% 
+  arrange(variable) %>% 
+  na.omit())
+mEsummaryCountry <- as.data.frame(multiEnvCountry)
+
+knitr::kable(mEsummaryCountry,caption="Multi-Environment Summary Statistics",col.names=c("Country","Trait","Min","Quartile.25","Median","Quartile.75","Max","Mean","St.Dev"),align=rep('c', 5))%>%
+  kableExtra::kable_styling(position = "center")
+```
+
+```{r}
+ggplot(mEsummaryCountry,aes(x=country,ymin=min,lower=q25,middle=median,upper=q75,ymax=max,fill=country))+
+  geom_boxplot(stat = "identity") +
+  facet_wrap(~variable,scales="free") +
+  labs(title="Multi-Environment Summary By-Country",size=30) +
+  theme(
+    plot.title=element_text(size=15),
+    axis.title.x=element_blank(),
+    axis.text.x=element_blank(),
+    axis.text.y=element_text(size=12),
+    axis.ticks.x=element_blank(),
+    strip.text.x=element_text(size=15))
+```
+
+### Model - Linear Mixed-Model BLUPs for Traits of Interest
+Here we need to make predictions BLUPs for genotype performance within environments (countryXlocation) before running the GxE analysis.
+```{r}
+multiEnvWide$EnvLocYr <- paste(multiEnvWide$country,multiEnvWide$location,multiEnvWide$year)
+multiEnvWide$EnvLocYr <- as.factor(multiEnvWide$EnvLocYr)
+names(multiEnvWide)[names(multiEnvWide)=="100SW"] <- "hundredSW"
+names(multiEnvWide)[names(multiEnvWide)=="50DF"] <- "fiftyDF"
+
+# what we are doing with these models below is to gather best linear unbiased predictions for each trait to remove effects of replication or other experimental effects (split, irrigated/nonirrigated, etc.)
+### Yield
+yieldLMM <- lme4::lmer(Yield~replication+(1|g_alias:EnvLocYr),data=multiEnvWide)
+yieldBlups <- fixef(yieldLMM)[1]+ranef(yieldLMM)$`g_alias:EnvLocYr`
+yieldBlups$`g_alias:EnvLocYr` <- rownames(yieldBlups)
+spl <- stringr::str_split_fixed(yieldBlups$`g_alias:EnvLocYr`,":",2)
+yieldBlups <- data.frame(cbind(spl,yieldBlups[,1]))
+yieldBlups[,3] <- as.numeric(yieldBlups[,3])
+yieldBlups[,1] <- as.factor(yieldBlups[,1])
+yieldBlups[,2] <- as.factor(yieldBlups[,2])
+colnames(yieldBlups) <- c("g_alias","EnvLocYr","yieldBLUP")
+
+### 100-Seed Weight
+hundredSWLMM <- lme4::lmer(hundredSW~replication+(1|g_alias:EnvLocYr),data=multiEnvWide)
+hundredSWBlups <- fixef(hundredSWLMM)[1]+ranef(hundredSWLMM)$`g_alias:EnvLocYr`
+hundredSWBlups$`g_alias:EnvLocYr` <- rownames(hundredSWBlups)
+spl <- stringr::str_split_fixed(hundredSWBlups$`g_alias:EnvLocYr`,":",2)
+hundredSWBlups <- data.frame(cbind(spl,hundredSWBlups[,1]))
+hundredSWBlups[,3] <- as.numeric(hundredSWBlups[,3])
+hundredSWBlups[,1] <- as.factor(hundredSWBlups[,1])
+hundredSWBlups[,2] <- as.factor(hundredSWBlups[,2])
+colnames(hundredSWBlups) <- c("g_alias","EnvLocYr","hundredSWBLUP")
+
+### Days to 50% Pod Maturity
+dmLMM <- lme4::lmer(DM~replication+(1|g_alias:EnvLocYr),data=multiEnvWide)
+dmBlups <- fixef(dmLMM)[1]+ranef(dmLMM)$`g_alias:EnvLocYr`
+dmBlups$`g_alias:EnvLocYr` <- rownames(dmBlups)
+spl <- stringr::str_split_fixed(dmBlups$`g_alias:EnvLocYr`,":",2)
+dmBlups <- data.frame(cbind(spl,dmBlups[,1]))
+dmBlups[,3] <- as.numeric(dmBlups[,3])
+dmBlups[,1] <- as.factor(dmBlups[,1])
+dmBlups[,2] <- as.factor(dmBlups[,2])
+colnames(dmBlups) <- c("g_alias","EnvLocYr","dmBlups")
+
+### Days to 50% Flowering
+fiftyDFLMM <- lme4::lmer(fiftyDF~replication+(1|g_alias:EnvLocYr),data=multiEnvWide)
+fiftyDFBlups <- fixef(fiftyDFLMM)[1]+ranef(fiftyDFLMM)$`g_alias:EnvLocYr`
+fiftyDFBlups$`g_alias:EnvLocYr` <- rownames(fiftyDFBlups)
+spl <- stringr::str_split_fixed(fiftyDFBlups$`g_alias:EnvLocYr`,":",2)
+fiftyDFBlups <- data.frame(cbind(spl,fiftyDFBlups[,1]))
+fiftyDFBlups[,3] <- as.numeric(fiftyDFBlups[,3])
+fiftyDFBlups[,1] <- as.factor(fiftyDFBlups[,1])
+fiftyDFBlups[,2] <- as.factor(fiftyDFBlups[,2])
+colnames(fiftyDFBlups) <- c("g_alias","EnvLocYr","fiftyDFBlups")
+
+### Plant Height while Flowering
+phLMM <- lme4::lmer(PH~replication+(1|g_alias:EnvLocYr),data=multiEnvWide)
+phBlups <- fixef(phLMM)[1]+ranef(phLMM)$`g_alias:EnvLocYr`
+phBlups$`g_alias:EnvLocYr` <- rownames(phBlups)
+spl <- stringr::str_split_fixed(phBlups$`g_alias:EnvLocYr`,":",2)
+phBlups <- data.frame(cbind(spl,phBlups[,1]))
+phBlups[,3] <- as.numeric(phBlups[,3])
+phBlups[,1] <- as.factor(phBlups[,1])
+phBlups[,2] <- as.factor(phBlups[,2])
+colnames(phBlups) <- c("g_alias","EnvLocYr","phBlups")
+
+### Pod length
+plLMM <- lme4::lmer(PL~replication+(1|g_alias:EnvLocYr),data=multiEnvWide)
+plBlups <- fixef(plLMM)[1]+ranef(plLMM)$`g_alias:EnvLocYr`
+plBlups$`g_alias:EnvLocYr` <- rownames(plBlups)
+spl <- stringr::str_split_fixed(plBlups$`g_alias:EnvLocYr`,":",2)
+plBlups <- data.frame(cbind(spl,plBlups[,1]))
+plBlups[,3] <- as.numeric(plBlups[,3])
+plBlups[,1] <- as.factor(plBlups[,1])
+plBlups[,2] <- as.factor(plBlups[,2])
+colnames(plBlups) <- c("g_alias","EnvLocYr","plBlups")
+
+### Average number of pods per plant
+podPplantLMM <- lme4::lmer(PodPerPlant~replication+(1|g_alias:EnvLocYr),data=multiEnvWide)
+podPplantBlups <- fixef(podPplantLMM)[1]+ranef(podPplantLMM)$`g_alias:EnvLocYr`
+podPplantBlups$`g_alias:EnvLocYr` <- rownames(podPplantBlups)
+spl <- stringr::str_split_fixed(podPplantBlups$`g_alias:EnvLocYr`,":",2)
+podPplantBlups <- data.frame(cbind(spl,podPplantBlups[,1]))
+podPplantBlups[,3] <- as.numeric(podPplantBlups[,3])
+podPplantBlups[,1] <- as.factor(podPplantBlups[,1])
+podPplantBlups[,2] <- as.factor(podPplantBlups[,2])
+colnames(podPplantBlups) <- c("g_alias","EnvLocYr","podPplantBlups")
+
+### Average seed weight per pod
+seedPpodLMM <- lme4::lmer(SeedPerPod~replication+(1|g_alias:EnvLocYr),data=multiEnvWide)
+seedPpodBlups <- fixef(seedPpodLMM)[1]+ranef(seedPpodLMM)$`g_alias:EnvLocYr`
+seedPpodBlups$`g_alias:EnvLocYr` <- rownames(seedPpodBlups)
+spl <- stringr::str_split_fixed(seedPpodBlups$`g_alias:EnvLocYr`,":",2)
+seedPpodBlups <- data.frame(cbind(spl,seedPpodBlups[,1]))
+seedPpodBlups[,3] <- as.numeric(seedPpodBlups[,3])
+seedPpodBlups[,1] <- as.factor(seedPpodBlups[,1])
+seedPpodBlups[,2] <- as.factor(seedPpodBlups[,2])
+colnames(seedPpodBlups) <- c("g_alias","EnvLocYr","seedPpodBlups")
+
+### Average seed yield per plant
+syieldPplantLMM <- lme4::lmer(SeedYieldplant~replication+(1|g_alias:EnvLocYr),data=multiEnvWide)
+syieldPplantBlups <- fixef(syieldPplantLMM)[1]+ranef(syieldPplantLMM)$`g_alias:EnvLocYr`
+syieldPplantBlups$`g_alias:EnvLocYr` <- rownames(syieldPplantBlups)
+spl <- stringr::str_split_fixed(syieldPplantBlups$`g_alias:EnvLocYr`,":",2)
+syieldPplantBlups <- data.frame(cbind(spl,syieldPplantBlups[,1]))
+syieldPplantBlups[,3] <- as.numeric(syieldPplantBlups[,3])
+syieldPplantBlups[,1] <- as.factor(syieldPplantBlups[,1])
+syieldPplantBlups[,2] <- as.factor(syieldPplantBlups[,2])
+colnames(syieldPplantBlups) <- c("g_alias","EnvLocYr","syieldPplantBlups")
+
+### Combine all BLUPs back into a dataframe by matching g_alias and EnvLocYear; filling NAs where appropriate
+dflist <- c(yieldBlups,hundredSWBlups,dmBlups,fiftyDFBlups,phBlups,plBlups,podPplantBlups,seedPpodBlups,syieldPplantBlups)
+
+a <- merge(yieldBlups,hundredSWBlups, by=c("g_alias","EnvLocYr"),all.x=TRUE,all.y=TRUE)
+b <- merge(a,dmBlups, by=c("g_alias","EnvLocYr"),all.x=TRUE,all.y=TRUE)
+c <- merge(b,fiftyDFBlups, by=c("g_alias","EnvLocYr"),all.x=TRUE,all.y=TRUE)
+d <- merge(c,phBlups, by=c("g_alias","EnvLocYr"),all.x=TRUE,all.y=TRUE)
+e <- merge(d,plBlups, by=c("g_alias","EnvLocYr"),all.x=TRUE,all.y=TRUE)
+f <- merge(e,podPplantBlups, by=c("g_alias","EnvLocYr"),all.x=TRUE,all.y=TRUE)
+g <- merge(f,seedPpodBlups, by=c("g_alias","EnvLocYr"),all.x=TRUE,all.y=TRUE)
+mergeBlups <- merge(g,syieldPplantBlups, by=c("g_alias","EnvLocYr"),all.x=TRUE,all.y=TRUE)
+mergeBlups[mergeBlups=='NA'] <- NA
+
+sapply(mergeBlups, function(x) sum(is.na(x)))
+
+allBlups <- mergeBlups[!is.na(mergeBlups$yieldBLUP),] # subset dataframe for those including yield information
+length(unique(allBlups$EnvLocYr)) #how many environments are we looking at with yield data
+sapply(allBlups, function(x) sum(is.na(x))/nrow(allBlups)) # how much (%) is missing in the other traits
+allBlups$syieldPplantBlups <- NULL # remove trait from BLUP dataframe that has high missingness
+```
+
+### Genomics Processing 
+To easily run GxE models, we need to conduct some data manipulation. First, we need to convert vcf file to numeric format, then filter out markers and individuals based on proportion of missing data, and then filter markers based on minor allele frequencies. Following this we will be matching the lines in the phenotype dataset to the lines in the genotype dataset. Last, we will be imputing missingness using markov chain.
+```{r}
+# Converting VCF file format to numerical matrix format that can be fit in statistical models
+gt <- extract.gt(vcf, element = "GT", as.numeric = F)
+fix_T <- as_tibble(getFIX(vcf))
+gt2 <- matrix(0, ncol = ncol(gt), nrow = nrow(gt))
+colnames(gt2) <- colnames(gt)
+gt2a <- apply(gt,2, function(x) gsub("1/1","1",x))
+gt2b <- gsub("0[/|]0","0",gt2a)
+gt2c <- gsub("[10][/|][10]","0.5",gt2b)
+gt2d <- gsub("\\.[/|]\\.","NA",gt2c)
+gt2d_num <- apply(gt2d, 2, as.numeric)
+#Adding row names back in
+rownames(gt2d_num) <- rownames(gt2d)
+geno_num <- t(gt2d_num)
+#Remove some of the data objects to open storage space
+rm(list=grep("gt2",ls(),value=TRUE))
+```
+
+```{r}
+# Filtering out markers on proportion of missing data
+miss <- function(x){length(which(is.na(x)))}
+mrkNA <- (apply(geno_num, MARGIN=2, FUN=miss))/dim(geno_num)[1]
+ndx <- which(mrkNA > 0.02)
+
+if (length(ndx)>0) geno_num2 <- geno_num[, -ndx] else geno_num2 <- geno_num
+```
+
+```{r}
+# Filtering out individuals on proportion of missing data
+indNA <- (apply(geno_num2, MARGIN=1, FUN=miss))/dim(geno_num2)[2]
+ndx2 <- which(indNA > 0.5)
+
+if (length(ndx2)>0) geno_num3 <- geno_num2[-ndx2, ] else geno_num3 <- geno_num2
+```
+
+```{r}
+# Filter markers based on MAF
+maf <- apply(geno_num3, MARGIN=2, FUN=mean, na.rm=T)
+ndx3 <- which(maf<0.05 | maf>0.95) 
+
+if (length(ndx3)>0) geno_num4 <- geno_num3[, -ndx3] else geno_num4 <- geno_num3
+```
+
+```{r}
+pheno <- allBlups
+# Match line ID between phenotype and genotype, removing some phenotype information of individuals not genotyped
+ndx4 <- match(pheno$g_alias,rownames(geno_num4))
+ndxNA <- which(is.na(ndx4))
+ndx5 <- ndx4[-ndxNA]
+pheno <- pheno[-ndxNA, ]
+ndx6 <- match(rownames(geno_num4),pheno$g_alias)
+ndxNA <- which(is.na(ndx6))
+ndx7 <- ndx6[-ndxNA]
+geno_num4 <- geno_num4[-ndxNA,]
+pheno <- droplevels(pheno)
+
+#write.csv(allBlups,"miniCore/allBlups.csv")
+
+```
+Impute markers using Markov chain imputation (R package NAM)
+```{r}
+library(NAM)
+impMethod="markov"
+# Impute genotype data using Markov chain implemented in the NAM package
+if (impMethod == "markov") geno_imp <- markov(apply(geno_num4[, -1], 2, as.numeric))
+if (impMethod == "markov") rownames(geno_imp) <- rownames(geno_num4)
+# Remove object for storage space
+rm(geno_num3,geno_num2,geno_num)
+```
+Additive genomics relationship matrix
+```{r}
+A <- sommer::A.mat(geno_imp)
+```
+
+# GxE Models
+There are different ways to leverage genotype-by-environment interactions: (1) ignore it - average performance across environments; (2) reduce it - cluster environments into subgroups and select cultivars for those environmental subgroups; or (3) exploit it - select environment specific cultivars to maximize productivity. Due to our environmental data being strictly geographical and not measured by environmental variables, our only option is to approach this analysis through (1), by ignoring GxE and trying to remove variation in our traits of interest attributable to environment because of its categorical nature. We will be approaching the analysis by specifying different variance-covariance structures, explained more at each section.
+
+### Main Effects
+This is main effects because we are specifying the genetic correlation structure as compound symmetry with equal genotypic variance and equal correlation among all pairs of environments where the residual variance is the same across environments.
+```{r}
+fitMain <- mmer(yieldBLUP~EnvLocYr-1,
+                random=~vsr(g_alias,Gu=A),
+                rcov=~units,
+                data=pheno,verbose=FALSE)
+summary(fitMain)
+
+m <- model.matrix(~ EnvLocYr-1 ,data=pheno)
+m_beta <- m %*% as.numeric(fitMain$Beta[,3]) 
+PredMain <- m_beta+fitMain$U$`u:g_alias`$yieldBLUP
+mainGEBLUPcor <- cor(PredMain,pheno[,"yieldBLUP"])
+print(paste0("The predictive ability for yield, based on Genomics BLUP with fixed effect environment and no GxE interaction, is ",round(mainGEBLUPcor,digits=4)))
+
+env <- unique(pheno$EnvLocYr)
+
+plot(PredMain,pheno[,"yieldBLUP"],col=pheno[,"EnvLocYr"])
+abline(a=0,b=yieldGEBLUPcor)
+
+# Heritability
+# extract variance components from mmer function
+vc <- summary(fitMain)$varcomp
+# solve for narrow-sense heritability
+mainGEh <- vc[1,1]/sum(vc[,1])
+print(paste0("The narrow-sense heritability for yield, based on Genomics BLUP with fixed effect environment and no GxE interaction, is ",round(mainGEh,digits=4)))
+```
+
+### Compound Symmetry Var-Covar 
+This is compound symmetry because we are specifying the genetic correlation structure as compound symmetry with equal genotypic variance and equal correlation among all pairs of environments where the residual variance is the same across environments.
+```{r}
+E <- diag(length(unique(pheno$EnvLocYr)))
+rownames(E) <- colnames(E) <- unique(pheno$EnvLocYr)
+
+EA <- kronecker(E,A, make.dimnames = TRUE) # matrix multiplication to find the kronecker product of environmental identity matrix by genotype name, resulting in an interaction type matrix for environment and genotype
+pheno$EnvLocYr <- as.factor(pheno$EnvLocYr)
+pheno$g_alias <- as.factor(pheno$g_alias)
+pheno$EnvLocYr_g_alias <- pheno$EnvLocYr:pheno$g_alias
+
+
+fitCS <- mmer(yieldBLUP~EnvLocYr-1,
+              random= ~ vsr(g_alias, Gu=A) + vsr(EnvLocYr:g_alias, Gu=EA),
+              rcov= ~ units,
+              data=pheno, verbose = FALSE)
+summary(fitCS)
+
+gebv <- data.frame(fitCS$U$`u:EnvLocYr:g_alias`$yieldBLUP)
+nd <- match(rownames(gebv),pheno$EnvLocYr_g_alias)
+ndNA <- which(is.na(nd))
+nd1 <- nd[-ndNA]
+gebvx <- gebv[-ndNA,]
+
+phen <- arrange(pheno,EnvLocYr_g_alias)
+
+csGEBLUPcor <- cor(gebvx,phen[,"yieldBLUP"]) 
+
+print(paste0("The predictive ability for yield, based on Genomics BLUP with fixed effect environment and no GxE interaction, is ",round(csGEBLUPcor,digits=4)))
+
+# Heritability
+# extract variance components from mmer function
+vc <- summary(fitCS)$varcomp
+# solve for narrow-sense heritability
+csGEh <- vc[1,1]/sum(vc[,1])
+print(paste0("The narrow-sense heritability for yield, based on Genomics BLUP with compound symmetry and GxE, is ",round(csGEh,digits=4)))
+```
+
+### Compound Symmetry Var-Covar with heterogeneous variance
+This is compound symmetry with heterogeneous variance because we are specifying the genetic correlation structure as compound symmetry wit heterogeneous genotypic variance in the environments and constant genotypic covariance across all environments with the residual variance as same across environments.
+```{r}
+fitCSDG <- mmer(yieldBLUP~EnvLocYr-1,
+                random=~vsr(g_alias,Gu=A) +vsr(dsr(EnvLocYr),g_alias,Gu=A),
+                rcov=~units,
+                data=pheno,verbose=FALSE) 
+
+summary(fitCSDG)
+
+m2 <- cbind(c(rep(1,nrow(pheno)/9),rep(0,2*nrow(pheno)/9)),c(rep(0,nrow(pheno)/9),rep(1,nrow(pheno)/9),rep(0,nrow(pheno)/9)),
+c(rep(0,nrow(pheno)/9),rep(0,nrow(pheno)/9),rep(1,nrow(pheno)/9)))
+
+m_beta <- m2 %*% as.numeric(fitCSDG$Beta[,3]) 
+length(m_beta)
+m_env_strain <- do.call(cbind,lapply(fitCSDG$U,function(x) x$Yield_blup))
+dim(m_env_strain)
+envStrain_blup <-c(m_env_strain[,2:4])                              
+                  
+strain_blup <- rep(fitCSDG$U$`u:strain`$Yield_blup,3)
+length(strain_blup)
+
+PredCSDG <- m_beta+strain_blup+envStrain_blup
+
+indES <-  sort.int(as.numeric(DT_Sub1[,"environ"]),decreasing=FALSE,index.return=TRUE)[[2]]
+
+cor(PredCSDG,DT_Sub1[indES,"Yield_blup"]) 
+plot(PredCSDG,DT_Sub1[indES,"Yield_blup"])
+```
+
+# GxE Modeling from Multi-Environment Trials
+### Read Datafiles
+```{r}
+# read in datasets
+WorkDir <- "C:/Users/natha/OneDrive/Desktop/UH_Manoa/PhD/SideProjects/WorldVeg/WorkshopTraining"
+setwd(WorkDir)
+source("C:/Users/natha/OneDrive/Desktop/UH_Manoa/PhD/SideProjects/WorldVeg/WorkshopTraining/Code/functions.R") # source the required packages for the following analyses
+multiEnvLong <- readxl::read_xlsx("C:/Users/natha/OneDrive/Desktop/UH_Manoa/PhD/SideProjects/WorldVeg/WorkshopTraining/Data/Inputs/MB_Pangenome_trait.xlsx",sheet="this")
+vcf <- read.vcfR("C:/Users/natha/OneDrive/Desktop/UH_Manoa/PhD/SideProjects/WorldVeg/WorkshopTraining/Data/Inputs/MMC_MAF005.vcf.gz", verbose = FALSE) # vcf of genomics (SNP) dataset
+```
+
+### Data Manipulation
+Here we need to input the data we are interested in. I have chosen 100-seed weight (100SW), days to 50% pod maturity (DM), days to 50% flowering (50DF), plant height while flowering (PH), pod length (PL), average number of pods per plant (PodPerPlant), average seed weight per pod (SeedPerPod), average seed yield per plant (SeedYieldplant), and yield (Yield). These were chosen because of their high representation through trial locations and years, with many of them being collected over multiple years and greater than 6 locations. 
+```{r}
+# check data for duplicated information -> go back to .xlsx file to remove duplicates through filtering
+multiEnvLong %>%
+    dplyr::group_by(no, g_alias, country, location, year, replication, trait) %>%
+    dplyr::summarise(n = dplyr::n(), .groups = "drop") %>%
+    dplyr::filter(n > 1L)
+# shift the data set from long format to wide format so we have both types to use depending on task
+multiEnvWide <- multiEnvLong %>% 
+  pivot_wider(
+  id_cols = c(no,g_alias,country,location,year,replication),
+  names_from = trait,
+  values_from = value)
+# set appropriate data format for the columns
+multiEnvWide[c(7:15)] <- suppressWarnings(sapply(multiEnvWide[c(7:15)],as.numeric))
+multiEnvWide$no <- as.factor(multiEnvWide$no)
+multiEnvWide$g_alias <- as.factor(multiEnvWide$g_alias)
+multiEnvWide$country <- as.factor(multiEnvWide$country)
+multiEnvWide$location <- as.factor(multiEnvWide$location)
+multiEnvWide$year <- as.factor(multiEnvWide$year)
+multiEnvWide$replication <- as.factor(multiEnvWide$replication)
+# proportion of missingness from each column in the dataframe
+sapply(multiEnvWide, function(x) sum(is.na(x))/nrow(multiEnvWide))
+```
+
+### Summary Statistics
+```{r}
+multiEnvLines <- suppressWarnings(multiEnvWide %>% group_by(g_alias) %>%
+  summarise(across(where(is.numeric), .fns = 
+                     list(min = min,
+                          q25 = ~quantile(., 0.25,na.rm=TRUE),
+                          median = median,
+                          q75 = ~quantile(., 0.75,na.rm=TRUE),
+                          max = max,
+                          mean = mean,
+                          stdev = sd),na.rm=TRUE)) %>%
+  pivot_longer(!g_alias,names_sep='_',names_to=c('variable','.value')) %>% 
+  arrange(variable) %>% 
+  na.omit())
+mEsummaryLines <- as.data.frame(multiEnvLines)
+```
+
+```{r}
+multiEnvCountry <- suppressWarnings(multiEnvWide %>% group_by(country) %>%
+  summarise(across(where(is.numeric), .fns = 
+                     list(min = min,
+                          q25 = ~quantile(., 0.25,na.rm=TRUE),
+                          median = median,
+                          q75 = ~quantile(., 0.75,na.rm=TRUE),
+                          max = max,
+                          mean = mean,
+                          stdev = sd),na.rm=TRUE)) %>%
+  pivot_longer(!country,names_sep='_',names_to=c('variable','.value')) %>% 
+  arrange(variable) %>% 
+  na.omit())
+mEsummaryCountry <- as.data.frame(multiEnvCountry)
+
+knitr::kable(mEsummaryCountry,caption="Multi-Environment Summary Statistics",col.names=c("Country","Trait","Min","Quartile.25","Median","Quartile.75","Max","Mean","St.Dev"),align=rep('c', 5))%>%
+  kableExtra::kable_styling(position = "center")
+```
+
+```{r, echo=FALSE}
+ggplot(mEsummaryCountry,aes(x=country,ymin=min,lower=q25,middle=median,upper=q75,ymax=max,fill=country))+
+  geom_boxplot(stat = "identity") +
+  facet_wrap(~variable,scales="free") +
+  labs(title="Multi-Environment Summary By-Country",size=30) +
+  theme(
+    plot.title=element_text(size=15),
+    axis.title.x=element_blank(),
+    axis.text.x=element_blank(),
+    axis.text.y=element_text(size=12),
+    axis.ticks.x=element_blank(),
+    strip.text.x=element_text(size=15))
+```
+
+### Model - Linear Mixed-Model BLUPs for Traits of Interest
+Here we need to make predictions BLUPs for genotype performance within environments (countryXlocation) before running the GxE analysis.
+```{r}
+multiEnvWide$EnvLocYr <- paste(multiEnvWide$country,multiEnvWide$location,multiEnvWide$year)
+multiEnvWide$EnvLocYr <- as.factor(multiEnvWide$EnvLocYr)
+names(multiEnvWide)[names(multiEnvWide)=="100SW"] <- "hundredSW"
+names(multiEnvWide)[names(multiEnvWide)=="50DF"] <- "fiftyDF"
+
+# what we are doing with these models below is to gather best linear unbiased predictions for each trait to remove effects of replication or other experimental effects (split, irrigated/nonirrigated, etc.)
+### Yield
+yieldLMM <- lme4::lmer(Yield~replication+(1|g_alias:EnvLocYr),data=multiEnvWide)
+yieldBlups <- fixef(yieldLMM)[1]+ranef(yieldLMM)$`g_alias:EnvLocYr`
+yieldBlups$`g_alias:EnvLocYr` <- rownames(yieldBlups)
+spl <- stringr::str_split_fixed(yieldBlups$`g_alias:EnvLocYr`,":",2)
+yieldBlups <- data.frame(cbind(spl,yieldBlups[,1]))
+yieldBlups[,3] <- as.numeric(yieldBlups[,3])
+yieldBlups[,1] <- as.factor(yieldBlups[,1])
+yieldBlups[,2] <- as.factor(yieldBlups[,2])
+colnames(yieldBlups) <- c("g_alias","EnvLocYr","yieldBLUP")
+
+### 100-Seed Weight
+hundredSWLMM <- lme4::lmer(hundredSW~replication+(1|g_alias:EnvLocYr),data=multiEnvWide)
+hundredSWBlups <- fixef(hundredSWLMM)[1]+ranef(hundredSWLMM)$`g_alias:EnvLocYr`
+hundredSWBlups$`g_alias:EnvLocYr` <- rownames(hundredSWBlups)
+spl <- stringr::str_split_fixed(hundredSWBlups$`g_alias:EnvLocYr`,":",2)
+hundredSWBlups <- data.frame(cbind(spl,hundredSWBlups[,1]))
+hundredSWBlups[,3] <- as.numeric(hundredSWBlups[,3])
+hundredSWBlups[,1] <- as.factor(hundredSWBlups[,1])
+hundredSWBlups[,2] <- as.factor(hundredSWBlups[,2])
+colnames(hundredSWBlups) <- c("g_alias","EnvLocYr","hundredSWBLUP")
+
+### Days to 50% Pod Maturity
+dmLMM <- lme4::lmer(DM~replication+(1|g_alias:EnvLocYr),data=multiEnvWide)
+dmBlups <- fixef(dmLMM)[1]+ranef(dmLMM)$`g_alias:EnvLocYr`
+dmBlups$`g_alias:EnvLocYr` <- rownames(dmBlups)
+spl <- stringr::str_split_fixed(dmBlups$`g_alias:EnvLocYr`,":",2)
+dmBlups <- data.frame(cbind(spl,dmBlups[,1]))
+dmBlups[,3] <- as.numeric(dmBlups[,3])
+dmBlups[,1] <- as.factor(dmBlups[,1])
+dmBlups[,2] <- as.factor(dmBlups[,2])
+colnames(dmBlups) <- c("g_alias","EnvLocYr","dmBlups")
+
+### Days to 50% Flowering
+fiftyDFLMM <- lme4::lmer(fiftyDF~replication+(1|g_alias:EnvLocYr),data=multiEnvWide)
+fiftyDFBlups <- fixef(fiftyDFLMM)[1]+ranef(fiftyDFLMM)$`g_alias:EnvLocYr`
+fiftyDFBlups$`g_alias:EnvLocYr` <- rownames(fiftyDFBlups)
+spl <- stringr::str_split_fixed(fiftyDFBlups$`g_alias:EnvLocYr`,":",2)
+fiftyDFBlups <- data.frame(cbind(spl,fiftyDFBlups[,1]))
+fiftyDFBlups[,3] <- as.numeric(fiftyDFBlups[,3])
+fiftyDFBlups[,1] <- as.factor(fiftyDFBlups[,1])
+fiftyDFBlups[,2] <- as.factor(fiftyDFBlups[,2])
+colnames(fiftyDFBlups) <- c("g_alias","EnvLocYr","fiftyDFBlups")
+
+### Plant Height while Flowering
+phLMM <- lme4::lmer(PH~replication+(1|g_alias:EnvLocYr),data=multiEnvWide)
+phBlups <- fixef(phLMM)[1]+ranef(phLMM)$`g_alias:EnvLocYr`
+phBlups$`g_alias:EnvLocYr` <- rownames(phBlups)
+spl <- stringr::str_split_fixed(phBlups$`g_alias:EnvLocYr`,":",2)
+phBlups <- data.frame(cbind(spl,phBlups[,1]))
+phBlups[,3] <- as.numeric(phBlups[,3])
+phBlups[,1] <- as.factor(phBlups[,1])
+phBlups[,2] <- as.factor(phBlups[,2])
+colnames(phBlups) <- c("g_alias","EnvLocYr","phBlups")
+
+### Pod length
+plLMM <- lme4::lmer(PL~replication+(1|g_alias:EnvLocYr),data=multiEnvWide)
+plBlups <- fixef(plLMM)[1]+ranef(plLMM)$`g_alias:EnvLocYr`
+plBlups$`g_alias:EnvLocYr` <- rownames(plBlups)
+spl <- stringr::str_split_fixed(plBlups$`g_alias:EnvLocYr`,":",2)
+plBlups <- data.frame(cbind(spl,plBlups[,1]))
+plBlups[,3] <- as.numeric(plBlups[,3])
+plBlups[,1] <- as.factor(plBlups[,1])
+plBlups[,2] <- as.factor(plBlups[,2])
+colnames(plBlups) <- c("g_alias","EnvLocYr","plBlups")
+
+### Average number of pods per plant
+podPplantLMM <- lme4::lmer(PodPerPlant~replication+(1|g_alias:EnvLocYr),data=multiEnvWide)
+podPplantBlups <- fixef(podPplantLMM)[1]+ranef(podPplantLMM)$`g_alias:EnvLocYr`
+podPplantBlups$`g_alias:EnvLocYr` <- rownames(podPplantBlups)
+spl <- stringr::str_split_fixed(podPplantBlups$`g_alias:EnvLocYr`,":",2)
+podPplantBlups <- data.frame(cbind(spl,podPplantBlups[,1]))
+podPplantBlups[,3] <- as.numeric(podPplantBlups[,3])
+podPplantBlups[,1] <- as.factor(podPplantBlups[,1])
+podPplantBlups[,2] <- as.factor(podPplantBlups[,2])
+colnames(podPplantBlups) <- c("g_alias","EnvLocYr","podPplantBlups")
+
+### Average seed weight per pod
+seedPpodLMM <- lme4::lmer(SeedPerPod~replication+(1|g_alias:EnvLocYr),data=multiEnvWide)
+seedPpodBlups <- fixef(seedPpodLMM)[1]+ranef(seedPpodLMM)$`g_alias:EnvLocYr`
+seedPpodBlups$`g_alias:EnvLocYr` <- rownames(seedPpodBlups)
+spl <- stringr::str_split_fixed(seedPpodBlups$`g_alias:EnvLocYr`,":",2)
+seedPpodBlups <- data.frame(cbind(spl,seedPpodBlups[,1]))
+seedPpodBlups[,3] <- as.numeric(seedPpodBlups[,3])
+seedPpodBlups[,1] <- as.factor(seedPpodBlups[,1])
+seedPpodBlups[,2] <- as.factor(seedPpodBlups[,2])
+colnames(seedPpodBlups) <- c("g_alias","EnvLocYr","seedPpodBlups")
+
+### Average seed yield per plant
+syieldPplantLMM <- lme4::lmer(SeedYieldplant~replication+(1|g_alias:EnvLocYr),data=multiEnvWide)
+syieldPplantBlups <- fixef(syieldPplantLMM)[1]+ranef(syieldPplantLMM)$`g_alias:EnvLocYr`
+syieldPplantBlups$`g_alias:EnvLocYr` <- rownames(syieldPplantBlups)
+spl <- stringr::str_split_fixed(syieldPplantBlups$`g_alias:EnvLocYr`,":",2)
+syieldPplantBlups <- data.frame(cbind(spl,syieldPplantBlups[,1]))
+syieldPplantBlups[,3] <- as.numeric(syieldPplantBlups[,3])
+syieldPplantBlups[,1] <- as.factor(syieldPplantBlups[,1])
+syieldPplantBlups[,2] <- as.factor(syieldPplantBlups[,2])
+colnames(syieldPplantBlups) <- c("g_alias","EnvLocYr","syieldPplantBlups")
+
+### Combine all BLUPs back into a dataframe by matching g_alias and EnvLocYear; filling NAs where appropriate
+dflist <- c(yieldBlups,hundredSWBlups,dmBlups,fiftyDFBlups,phBlups,plBlups,podPplantBlups,seedPpodBlups,syieldPplantBlups)
+
+a <- merge(yieldBlups,hundredSWBlups, by=c("g_alias","EnvLocYr"),all.x=TRUE,all.y=TRUE)
+b <- merge(a,dmBlups, by=c("g_alias","EnvLocYr"),all.x=TRUE,all.y=TRUE)
+c <- merge(b,fiftyDFBlups, by=c("g_alias","EnvLocYr"),all.x=TRUE,all.y=TRUE)
+d <- merge(c,phBlups, by=c("g_alias","EnvLocYr"),all.x=TRUE,all.y=TRUE)
+e <- merge(d,plBlups, by=c("g_alias","EnvLocYr"),all.x=TRUE,all.y=TRUE)
+f <- merge(e,podPplantBlups, by=c("g_alias","EnvLocYr"),all.x=TRUE,all.y=TRUE)
+g <- merge(f,seedPpodBlups, by=c("g_alias","EnvLocYr"),all.x=TRUE,all.y=TRUE)
+mergeBlups <- merge(g,syieldPplantBlups, by=c("g_alias","EnvLocYr"),all.x=TRUE,all.y=TRUE)
+mergeBlups[mergeBlups=='NA'] <- NA
+
+sapply(mergeBlups, function(x) sum(is.na(x)))
+
+allBlups <- mergeBlups[!is.na(mergeBlups$yieldBLUP),] # subset dataframe for those including yield information
+length(unique(allBlups$EnvLocYr)) #how many environments are we looking at with yield data
+sapply(allBlups, function(x) sum(is.na(x))/nrow(allBlups)) # how much (%) is missing in the other traits
+allBlups$syieldPplantBlups <- NULL # remove trait from BLUP dataframe that has high missingness
+```
+
+### Genomics Processing 
+To easily run GxE models, we need to conduct some data manipulation. First, we need to convert vcf file to numeric format, then filter out markers and individuals based on proportion of missing data, and then filter markers based on minor allele frequencies. Following this we will be matching the lines in the phenotype dataset to the lines in the genotype dataset. Last, we will be imputing missingness using markov chain.
+```{r}
+# Converting VCF file format to numerical matrix format that can be fit in statistical models
+gt <- extract.gt(vcf, element = "GT", as.numeric = F)
+fix_T <- as_tibble(getFIX(vcf))
+gt2 <- matrix(0, ncol = ncol(gt), nrow = nrow(gt))
+colnames(gt2) <- colnames(gt)
+gt2a <- apply(gt,2, function(x) gsub("1/1","1",x))
+gt2b <- gsub("0[/|]0","0",gt2a)
+gt2c <- gsub("[10][/|][10]","0.5",gt2b)
+gt2d <- gsub("\\.[/|]\\.","NA",gt2c)
+gt2d_num <- apply(gt2d, 2, as.numeric)
+#Adding row names back in
+rownames(gt2d_num) <- rownames(gt2d)
+geno_num <- t(gt2d_num)
+#Remove some of the data objects to open storage space
+rm(list=grep("gt2",ls(),value=TRUE))
+```
+
+```{r}
+# Filtering out markers on proportion of missing data
+miss <- function(x){length(which(is.na(x)))}
+mrkNA <- (apply(geno_num, MARGIN=2, FUN=miss))/dim(geno_num)[1]
+ndx <- which(mrkNA > 0.02)
+
+if (length(ndx)>0) geno_num2 <- geno_num[, -ndx] else geno_num2 <- geno_num
+```
+
+```{r}
+# Filtering out individuals on proportion of missing data
+indNA <- (apply(geno_num2, MARGIN=1, FUN=miss))/dim(geno_num2)[2]
+ndx2 <- which(indNA > 0.5)
+
+if (length(ndx2)>0) geno_num3 <- geno_num2[-ndx2, ] else geno_num3 <- geno_num2
+```
+
+```{r}
+# Filter markers based on MAF
+maf <- apply(geno_num3, MARGIN=2, FUN=mean, na.rm=T)
+ndx3 <- which(maf<0.05 | maf>0.95) 
+
+if (length(ndx3)>0) geno_num4 <- geno_num3[, -ndx3] else geno_num4 <- geno_num3
+```
+
+
+```{r}
+pheno <- allBlups
+# Match line ID between phenotype and genotype, removing some phenotype information of individuals not genotyped
+
+pheno %>% group_by(EnvLocYr) %>% count(EnvLocYr) #find environment with low representation by genotypes
+
+pheno <- pheno[!pheno$EnvLocYr=="Myanmar Magway 2016",] #remove the above environment
+pheno <- droplevels(pheno)
+
+shared <- pheno %>% group_by(g_alias) %>% summarise(shared=n_distinct(EnvLocYr))
+
+sharedSub <- shared[!shared$shared<8,] #remove genotypes that have fewer than 8 environments tested
+
+
+pheno2 <- pheno[pheno$g_alias%in%sharedSub$g_alias,]
+
+pheno2 %>% group_by(EnvLocYr) %>% count(EnvLocYr)  
+
+ndx4 <- match(pheno2$g_alias,rownames(geno_num4))
+ndxNA <- which(is.na(ndx4))
+ndx5 <- ndx4[-ndxNA]
+pheno2 <- pheno2[-ndxNA, ]
+ndx6 <- match(rownames(geno_num4),pheno2$g_alias)
+ndxNA <- which(is.na(ndx6))
+ndx7 <- ndx6[-ndxNA]
+geno_num4 <- geno_num4[-ndxNA,]
+pheno2 <- droplevels(pheno2)
+
+#write.csv(allBlups,"C:/Users/natha/OneDrive/Desktop/UH_Manoa/PhD/SideProjects/WorldVeg/WorkshopTraining/Data/Outputs/allgeBlups.csv")
+
+```
+Impute markers using Markov chain imputation (R package NAM)
+```{r}
+library(NAM)
+impMethod="markov"
+# Impute genotype data using Markov chain implemented in the NAM package
+if (impMethod == "markov") geno_imp <- markov(apply(geno_num4[, -1], 2, as.numeric))
+if (impMethod == "markov") rownames(geno_imp) <- rownames(geno_num4)
+# Remove object for storage space
+rm(geno_num3,geno_num2,geno_num)
+```
+Additive genomics relationship matrix
+```{r}
+A <- sommer::A.mat(geno_imp)
+```
+
+# GxE Models
+There are different ways to leverage genotype-by-environment interactions: (1) ignore it - average performance across environments; (2) reduce it - cluster environments into subgroups and select cultivars for those environmental subgroups; or (3) exploit it - select environment specific cultivars to maximize productivity. Due to our environmental data being strictly geographical and not measured by environmental variables, our only option is to approach this analysis through (1), by ignoring GxE and trying to remove variation in our traits of interest attributable to environment because of its categorical nature. We will be approaching the analysis by specifying different variance-covariance structures, explained more at each section.
+
+
+### Main Effects
+This is main effects because we are specifying the genetic correlation structure as compound symmetry with equal genotypic variance and equal correlation among all pairs of environments where the residual variance is the same across environments.
+```{r}
+fitMain <- mmer(yieldBLUP~EnvLocYr-1,
+                random=~vsr(g_alias,Gu=A),
+                rcov=~units,
+                data=pheno2,verbose=FALSE)
+summary(fitMain)
+
+m <- model.matrix(~ EnvLocYr-1 ,data=pheno2)
+m_beta <- m %*% as.numeric(fitMain$Beta[,3]) 
+PredMain <- m_beta+fitMain$U$`u:g_alias`$yieldBLUP
+mainGEBLUPcor <- cor(PredMain,pheno2[,"yieldBLUP"])
+print(paste0("The predictive ability for yield, based on Genomics BLUP with fixed effect environment and no GxE interaction, is ",round(mainGEBLUPcor,digits=4)))
+
+env <- unique(pheno2$EnvLocYr)
+
+plot(PredMain,pheno2[,"yieldBLUP"],col=pheno2[,"EnvLocYr"])
+abline(a=0,b=mainGEBLUPcor)
+
+# Heritability
+# extract variance components from mmer function
+vc <- summary(fitMain)$varcomp
+# solve for narrow-sense heritability
+mainGEh <- vc[1,1]/sum(vc[,1])
+print(paste0("The narrow-sense heritability for yield, based on Genomics BLUP with fixed effect environment and no GxE interaction, is ",round(mainGEh,digits=4)))
+```
+
+#### Line Selection - Main Effects GxE Model Predictions
+```{r}
+mainGenoPred <- data.frame(fitMain$U$`u:g_alias`$yieldBLUP)
+
+colnames(mainGenoPred) <- "geMainBLUP"
+mainGenoPred$g_alias <- rownames(mainGenoPred)
+
+geMainBLUPs <- mainGenoPred %>% arrange(desc(geMainBLUP))
+selInd <- geMainBLUPs[c(1:30),c("g_alias","geMainBLUP")]
+
+# Reintroduce means of yield 
+mEsummaryYieldLines <- subset(mEsummaryLines,variable=="Yield")
+
+selInd_geMainBLUPs <- merge(selInd,mEsummaryYieldLines,by.x="g_alias")
+selInd_geMainBLUPs <- selInd_geMainBLUPs[order(-selInd_geMainBLUPs$geMainBLUP),c(1:2,9)]
+colnames(selInd_geMainBLUPs) <- c("g_alias","geMainBLUP","meanYield")
+
+# Output table of top 30 lines
+knitr::kable(selInd_geMainBLUPs,caption="Multi-Environment Predicted Yield (geBLUP) - Main Line Selections",col.names=c("Genotype","Main GxE BLUP","Mean Yield"))
+```
+
+### Compound Symmetry Var-Covar 
+This is compound symmetry because we are specifying the genetic correlation structure as compound symmetry with equal genotypic variance and equal correlation among all pairs of environments where the residual variance is the same across environments.
+```{r}
+E <- diag(length(unique(pheno$EnvLocYr)))
+rownames(E) <- colnames(E) <- unique(pheno2$EnvLocYr)
+
+EA <- kronecker(E,A, make.dimnames = TRUE) # matrix multiplication to find the kronecker product of environmental identity matrix by genotype name, resulting in an interaction type matrix for environment and genotype
+pheno2$EnvLocYr <- as.factor(pheno2$EnvLocYr)
+pheno2$g_alias <- as.factor(pheno2$g_alias)
+pheno2$EnvLocYr_g_alias <- pheno2$EnvLocYr:pheno2$g_alias
+
+
+fitCS <- mmer(yieldBLUP~EnvLocYr-1,
+              random= ~ vsr(g_alias, Gu=A) + vsr(EnvLocYr:g_alias, Gu=EA),
+              rcov= ~ units,
+              data=pheno2, verbose = FALSE)
+summary(fitCS)
+
+m <- model.matrix(~ EnvLocYr-1 ,data=pheno2)
+m_beta <- m %*% as.numeric(fitCS$Beta[,3]) 
+PredCS <- m_beta+fitCS$U$`u:EnvLocYr:g_alias`$yieldBLUP
+csGEBLUPcor <- cor(PredCS,pheno2[,"yieldBLUP"]) 
+plot(PredCS,pheno2[,"yieldBLUP"],col=pheno2[,"EnvLocYr"])
+abline(a=0,b=csGEBLUPcor)
+
+
+print(paste0("The predictive ability for yield, based on Genomics BLUP with compound symmetry and GxE, is ",round(csGEBLUPcor,digits=4)))
+
+# Heritability
+# extract variance components from mmer function
+vc <- summary(fitCS)$varcomp
+# solve for narrow-sense heritability
+csGEh <- vc[1,1]/sum(vc[,1])
+print(paste0("The narrow-sense heritability for yield, based on Genomics BLUP with compound symmetry and GxE, is ",round(csGEh,digits=4)))
+```
+
+#### Model Fit Comparison - Main versus CS
+```{r}
+anova(fitMain,fitCS)
+```
+
+#### Line Selection - Compound Symmetry Effects GxE Model Predictions
+```{r}
+csGenoPred <- data.frame(fitCS$U$`u:g_alias`$yieldBLUP)
+
+colnames(csGenoPred) <- "geCSBLUP"
+csGenoPred$g_alias <- rownames(csGenoPred)
+
+geCSBLUPs <- csGenoPred %>% arrange(desc(geCSBLUP))
+selInd <- geCSBLUPs[c(1:30),c("g_alias","geCSBLUP")]
+
+# Reintroduce means of yield 
+mEsummaryYieldLines <- subset(mEsummaryLines,variable=="Yield")
+
+selInd_gecsBLUPs <- merge(selInd,mEsummaryYieldLines,by.x="g_alias")
+selInd_gecsBLUPs <- selInd_gecsBLUPs[order(-selInd_gecsBLUPs$geCSBLUP),c(1:2,9)]
+colnames(selInd_gecsBLUPs) <- c("g_alias","geCSBLUP","meanYield")
+
+# Output table of top 30 lines
+knitr::kable(selInd_gecsBLUPs,caption="Multi-Environment Predicted Yield (geBLUP) - Line Selections CS",col.names=c("Genotype","CS GxE BLUP","Mean Yield"))
+```
+
+### Compound Symmetry Var-Covar with heterogeneous variance
+This is compound symmetry with heterogeneous variance because we are specifying the genetic correlation structure as compound symmetry wit heterogeneous genotypic variance in the environments and constant genotypic covariance across all environments with the residual variance as same across environments.
+```{r}
+fitCSDG <- mmer(yieldBLUP~EnvLocYr-1,
+                random=~vsr(g_alias,Gu=A) +vsr(dsr(EnvLocYr),g_alias,Gu=A),
+                rcov=~units,
+                data=pheno2,verbose=TRUE) 
+
+summary(fitCSDG)
+
+# Identity dataframe
+m2 <- cbind(c(rep(1,nrow(pheno2)/8),rep(0,7*nrow(pheno2)/8)),
+            c(rep(0,nrow(pheno2)/8),rep(1,nrow(pheno2)/8),rep(0,nrow(pheno2)/8),rep(0,nrow(pheno2)/8),rep(0,nrow(pheno2)/8),rep(0,nrow(pheno2)/8),rep(0,nrow(pheno2)/8),rep(0,nrow(pheno2)/8)),
+c(rep(0,nrow(pheno2)/8),rep(0,nrow(pheno2)/8),rep(1,nrow(pheno2)/8),rep(0,nrow(pheno2)/8),rep(0,nrow(pheno2)/8),rep(0,nrow(pheno2)/8),rep(0,nrow(pheno2)/8),rep(0,nrow(pheno2)/8)),
+c(rep(0,nrow(pheno2)/8),rep(0,nrow(pheno2)/8),rep(0,nrow(pheno2)/8),rep(1,nrow(pheno2)/8),rep(0,nrow(pheno2)/8),rep(0,nrow(pheno2)/8),rep(0,nrow(pheno2)/8),rep(0,nrow(pheno2)/8)),
+c(rep(0,nrow(pheno2)/8),rep(0,nrow(pheno2)/8),rep(0,nrow(pheno2)/8),rep(0,nrow(pheno2)/8),rep(1,nrow(pheno2)/8),rep(0,nrow(pheno2)/8),rep(0,nrow(pheno2)/8),rep(0,nrow(pheno2)/8)),
+c(rep(0,nrow(pheno2)/8),rep(0,nrow(pheno2)/8),rep(0,nrow(pheno2)/8),rep(0,nrow(pheno2)/8),rep(0,nrow(pheno2)/8),rep(1,nrow(pheno2)/8),rep(0,nrow(pheno2)/8),rep(0,nrow(pheno2)/8)),
+c(rep(0,nrow(pheno2)/8),rep(0,nrow(pheno2)/8),rep(0,nrow(pheno2)/8),rep(0,nrow(pheno2)/8),rep(0,nrow(pheno2)/8),rep(0,nrow(pheno2)/8),rep(1,nrow(pheno2)/8),rep(0,nrow(pheno2)/8)),
+c(rep(0,nrow(pheno2)/8),rep(0,nrow(pheno2)/8),rep(0,nrow(pheno2)/8),rep(0,nrow(pheno2)/8),rep(0,nrow(pheno2)/8),rep(0,nrow(pheno2)/8),rep(0,nrow(pheno2)/8),rep(1,nrow(pheno2)/8)))
+
+m_beta <- m2 %*% as.numeric(fitCSDG$Beta[,3]) 
+length(m_beta)
+m_env_strain <- do.call(cbind,lapply(fitCSDG$U,function(x) x$yieldBLUP))
+dim(m_env_strain)
+envStrain_blup <-c(m_env_strain[,2:9])                              
+                  
+strain_blup <- rep(fitCSDG$U$`u:g_alias`$yieldBLUP,8)
+length(strain_blup)
+
+PredCSDG <- m_beta+strain_blup+envStrain_blup
+
+indES <-  sort.int(as.numeric(pheno2[,"EnvLocYr"]),decreasing=FALSE,index.return=TRUE)[[2]]
+
+csdgGEBLUPcor <- cor(PredCSDG,pheno2[indES,"yieldBLUP"]) 
+plot(PredCSDG,pheno2[indES,"yieldBLUP"],col=pheno2[indES,"EnvLocYr"])
+abline(a=0,b=csdgGEBLUPcor)
+
+
+print(paste0("The predictive ability for yield, based on Genomics BLUP with compound symmetry with heterogenous variance and GxE, is ",round(csdgGEBLUPcor,digits=4)))
+
+# Heritability
+# extract variance components from mmer function
+vc <- summary(fitCSDG)$varcomp
+# solve for narrow-sense heritability
+csdgGEh <- vc[1,1]/sum(vc[,1])
+print(paste0("The narrow-sense heritability for yield, based on Genomics BLUP with compound symmetry with heterogenous variance and GxE, is ",round(csdgGEh,digits=4)))
+```
+
+#### Model Fit Comparison - Main versus CSDG
+```{r}
+anova(fitMain,fitCSDG)
+```
+
+#### Line Selection - Compound Symmetry Heterogenous Variance Effects GxE Model Predictions
+```{r}
+csdgGenoPred <- data.frame(fitCSDG$U$`u:g_alias`$yieldBLUP)
+
+colnames(csdgGenoPred) <- "geCSDGBLUP"
+csdgGenoPred$g_alias <- rownames(csdgGenoPred)
+
+geCSDGBLUPs <- csdgGenoPred %>% arrange(desc(geCSDGBLUP))
+selInd <- geCSDGBLUPs[c(1:30),c("g_alias","geCSDGBLUP")]
+
+# Reintroduce means of yield 
+mEsummaryYieldLines <- subset(mEsummaryLines,variable=="Yield")
+
+selInd_gecsdgBLUPs <- merge(selInd,mEsummaryYieldLines,by.x="g_alias")
+selInd_gecsdgBLUPs <- selInd_gecsdgBLUPs[order(-selInd_gecsdgBLUPs$geCSDGBLUP),c(1:2,9)]
+colnames(selInd_gecsdgBLUPs) <- c("g_alias","geCSDGBLUP","meanYield")
+
+# Output table of top 30 lines
+knitr::kable(selInd_gecsdgBLUPs,caption="Multi-Environment Predicted Yield (geBLUP) - Line Selections CSDG",col.names=c("Genotype","CSDG GxE BLUP","Mean Yield"))
+```
+
+### Selection Comparison - GxE Models
+```{r}
+### GxE Model Selections - Main versus Compound Symmetry
+# Calculate how many selections from Main effects were also found in the CS effects
+length(which(selInd_geMainBLUPs$g_alias%in%selInd_gecsBLUPs$g_alias))
+
+# The names of the lines selected by Main effects vs CS effects
+selIndPGBlupsMLMM[selInd_geMainBLUPs$g_alias%in%selInd_gecsBLUPs$g_alias,]["g_alias"]
+
+### GxE Model Selections - Compound Symmetry Heterogenous versus Compound Symmetry
+# Calculate how many selections from CSDG effects were also found in the CS effects
+length(which(selInd_gecsdgBLUPs$g_alias%in%selInd_gecsBLUPs$g_alias))
+
+# The names of the lines selected by CSDG effects vs CS effects
+selIndPGBlupsMLMM[selInd_gecsdgBLUPs$g_alias%in%selInd_gecsBLUPs$g_alias,]["g_alias"]
+
+### GxE Model Selections - Main versus Compound Symmetry Heterogenous
+# Calculate how many selections from Main effects were also found in the CSDG effects
+length(which(selInd_geMainBLUPs$g_alias%in%selInd_gecsdgBLUPs$g_alias))
+
+# The names of the lines selected by Main effects vs CSDG effects
+selIndPGBlupsMLMM[selInd_geMainBLUPs$g_alias%in%selInd_gecsdgBLUPs$g_alias,]["g_alias"]
+```
+
+```{r,fig.height=15,fig.width=15}
+library(ggVennDiagram)
+
+selectionsGxE <- data.frame(cbind(selInd_geMainBLUPs$g_alias,selInd_gecsBLUPs$g_alias,selInd_gecsdgBLUPs$g_alias))
+colnames(selectionsGxE) <- c("gemainBLUP","gecsBLUP","gecsdgBLUP")
+
+ggVennDiagram(selectionsGxE,label="count",label_alpha=0,label_size=6) +
+  scale_fill_distiller(palette = "RdBu") +
+  labs(title="Intersecting GxE BLUP Line Selections") +
+  theme(legend.key.size = unit(1, 'cm'),
+        legend.title = element_text(size=14),
+        legend.text = element_text(size=12),
+        title = element_text(size=16)) 
+```
+
+```{r}
+selectionsGEBLUP <- data.frame(cbind(selInd_geMainBLUPs$g_alias,selInd_gecsBLUPs$g_alias,selInd_gecsdgBLUPs$g_alias))
+colnames(selectionsGEBLUP) <- c("gemainBLUP","gecsBLUP","gecsdgBLUP")
+selectionsGEBLUP$Rank <- rep(1:nrow(selectionsGEBLUP))
+selectionsGEBLUP <- selectionsGEBLUP[,c(4,1:3)]
+#write.csv(selectionsGEBLUP,"C:/Users/natha/OneDrive/Desktop/UH_Manoa/PhD/SideProjects/WorldVeg/WorkshopTraining/Data/Outputs/lineSelectionsGEBLUP.csv")
+
+commonGEBLUP <- Reduce(intersect, list(selectionsGEBLUP$gemainBLUP,selectionsGEBLUP$gecsBLUP,selectionsGEBLUP$gecsdgBLUP))
+```
+
+
+## Selection Comparison - All Models (**Section2** & **Section3**)
+```{r}
+selectionsAll <- data.frame(cbind(selIndBlupsLMM$g_alias,selIndBlupsMLMM$g_alias,selIndGBlupsMLMM$g_alias,selIndPGBlupsMLMM$g_alias,selInd_geMainBLUPs$g_alias,selInd_gecsBLUPs$g_alias,selInd_gecsdgBLUPs$g_alias))
+colnames(selectionsAll) <- c("BLUP","pBLUP","gBLUP","pgBLUP","gemainBLUP","gecsBLUP","gecsdgBLUP")
+selectionsAll$Rank <- rep(1:nrow(selections))
+selectionsAll <- selectionsAll[,c(8,1:7)]
+
+common <- Reduce(intersect, list(selIndBlupsLMM$g_alias,selIndBlupsMLMM$g_alias,selIndGBlupsMLMM$g_alias,selIndPGBlupsMLMM$g_alias,selInd_geMainBLUPs$g_alias,selInd_gecsBLUPs$g_alias,selInd_gecsdgBLUPs$g_alias))
+```
+
+```{r}
+cblup <- data.frame(cbind(commonBLUP,commonGEBLUP))
+colnames(cblup) <- c("BLUP","geBLUP")
+
+ggVennDiagram(cblup,label="count",label_alpha=0,label_size=6) +
+  scale_fill_distiller(palette = "RdBu") +
+  labs(title="Intersecting BLUP and GxE BLUP Line Selections") +
+  theme(legend.key.size = unit(1, 'cm'),
+        legend.title = element_text(size=14),
+        legend.text = element_text(size=12),
+        title = element_text(size=16)) 
+```
+
+# Cross-Validation GxE Model
+### Compound Symmetry Var-Covar with heterogeneous variance
+We are moving forward with cross-validation in CSDG, or compound symmetry with heterogeneous variance, because the assumptions fit our testing. This is the case because we are assuming different variances for each of our observation points (environments), instead of the same genotypic variance in each environment.
+
+**CAUTION!!! THIS CHUNK WILL TAKE >12 HOURS TO RUN LOCALLY.**
+Recommended to output and run through command line through external processing/computing. See .r script "commandLine_PhenomicGenomicSel.R" for complete usage to input to anaconda r environment.
+```{r,eval=FALSE}
+### Cross-Validation Phenomics and Genomics MLMM Prediction
+ndxShuf <- sample(1:nrow(pheno2)[1],)
+phenoShuf <- pheno2[ndxShuf, ]
+A <- sommer::A.mat(geno_imp)
+
+k <- 121 # How many K-partitions are we breaking our data (121 or 242 are the options because the nrow(pheno) must be cleanly divisible)
+predictors <- c("EnvLocYr","g_alias","A")
+LineBLUPs <- list() # empty list to store the line GxE BLUPs for each trait 
+PredAbility <- list() # empty list to store the predictive ability of the model for each trait 
+predStor <- vector(length=length(ndxShuf)) # empty vector to store within the loop each kcv to then be used for calculating predictive ability correlation(predicted,observed)
+
+library(sommer)
+    
+    cnt <- 1:floor(length(ndxShuf)/k) #how many observations per group to be left out 
+    
+    for (i in 1:k){
+      
+      df <- phenoShuf
+      df$yieldBLUP[cnt] <- NA
+      
+      # Fit an geBLUP model using the sommer package
+      fit <- mmer(yieldBLUP~EnvLocYr-1,
+                random=~vsr(g_alias,Gu=A) +vsr(dsr(EnvLocYr),g_alias,Gu=A),
+                rcov=~units,
+                data=df,verbose=TRUE) 
+      
+      # Identity dataframe
+      m2 <- cbind(c(rep(1,nrow(df)/8),rep(0,7*nrow(df)/8)),
+            c(rep(0,nrow(df)/8),rep(1,nrow(df)/8),rep(0,nrow(df)/8),rep(0,nrow(df)/8),rep(0,nrow(df)/8),
+              rep(0,nrow(df)/8),rep(0,nrow(df)/8),rep(0,nrow(df)/8)),
+            c(rep(0,nrow(df)/8),rep(0,nrow(df)/8),rep(1,nrow(df)/8),rep(0,nrow(df)/8),rep(0,nrow(df)/8),
+              rep(0,nrow(df)/8),rep(0,nrow(df)/8),rep(0,nrow(df)/8)),
+            c(rep(0,nrow(df)/8),rep(0,nrow(df)/8),rep(0,nrow(df)/8),rep(1,nrow(df)/8),rep(0,nrow(df)/8),
+              rep(0,nrow(df)/8),rep(0,nrow(df)/8),rep(0,nrow(df)/8)),
+            c(rep(0,nrow(df)/8),rep(0,nrow(df)/8),rep(0,nrow(df)/8),rep(0,nrow(df)/8),rep(1,nrow(df)/8),
+              rep(0,nrow(df)/8),rep(0,nrow(df)/8),rep(0,nrow(df)/8)),
+            c(rep(0,nrow(df)/8),rep(0,nrow(df)/8),rep(0,nrow(df)/8),rep(0,nrow(df)/8),rep(0,nrow(df)/8),
+              rep(1,nrow(df)/8),rep(0,nrow(df)/8),rep(0,nrow(df)/8)),
+            c(rep(0,nrow(df)/8),rep(0,nrow(df)/8),rep(0,nrow(df)/8),rep(0,nrow(df)/8),rep(0,nrow(df)/8),
+              rep(0,nrow(df)/8),rep(1,nrow(df)/8),rep(0,nrow(df)/8)),
+            c(rep(0,nrow(df)/8),rep(0,nrow(df)/8),rep(0,nrow(df)/8),rep(0,nrow(df)/8),rep(0,nrow(df)/8),
+              rep(0,nrow(df)/8),rep(0,nrow(df)/8),rep(1,nrow(df)/8)))
+
+      m_beta <- m2 %*% as.numeric(fit$Beta[,3]) 
+        length(m_beta)
+      betaID <- data.frame(cbind(unique(as.vector(pheno2$EnvLocYr)),fit$Beta[,3]))
+      colnames(betaID) <- c("EnvLocYr","Beta")
+      ids <- data.frame(df$EnvLocYr)
+      ids <- ids %>%
+  mutate(Beta=betaID$Beta[match(df.EnvLocYr,betaID$EnvLocYr)])
+      
+      ndx <- match(ids$Beta,m_beta)
+      m_beta <- m_beta[ndx,]
+      
+      
+      m_env_strain <- do.call(cbind,lapply(fit$U,function(x) x$yieldBLUP))
+        dim(m_env_strain)
+      envStrain_blup <- data.frame(c(m_env_strain[,2:9]))
+      envStrain_blup$EnvLocYr <- rep(c(betaID$EnvLocYr),each=242)
+      envStrain_blup$g_alias <- rep(c(rownames(m_env_strain)),times=8)
+      colnames(envStrain_blup) <- c("envStrain_blup","EnvLocYr","g_alias")
+      
+      ndxjoin <- left_join(df[,c(1:2)],envStrain_blup)
+      envStrain_blup <- as.vector(ndxjoin$envStrain_blup)
+                  
+      strain_blup <- data.frame(rep(fit$U$`u:g_alias`$yieldBLUP,8))
+      colnames(strain_blup) <- "strain_blup"
+        length(strain_blup)
+      fitid <- as.data.frame(t(data.frame(as.list(fit$U$`u:g_alias`$yieldBLUP))))
+      fitid$g_alias <- rownames(fitid)
+      colnames(fitid) <- c("strain_blup","g_alias")
+      strain_blup <- strain_blup %>%
+  mutate(g_alias=fitid$g_alias[match(strain_blup,fitid$strain_blup)])
+      strain_blup$g_alias <- stringr::str_replace_all(strain_blup$g_alias,"[.]","-")
+      ndx <- match(df$g_alias,strain_blup$g_alias)
+      strain_blup <- strain_blup[ndx,]
+      strain_blup <- as.vector(strain_blup$strain_blup)
+
+      PredCV <- m_beta+strain_blup+envStrain_blup
+      
+      predStor[cnt] <- PredCV[cnt] #store the predicted results for cnt
+      
+      cnt <- cnt + floor(length(ndxShuf)/k) #change cnt to next row (genotype's phenotype) to be excluded from analysis
+    }
+    
+    
+    indES <-  sort.int(as.numeric(phenoShuf[,"EnvLocYr"]),decreasing=FALSE,index.return=TRUE)[[2]]
+    PredAbility <- cor(predStor,phenoShuf$yieldBLUP) #store prediction accuracy by for each trait LMM
+    
+  
+
+library(dplyr)
+#apply phenotype and line names to dataframes
+LineGEBLUPs <- data.frame(predStor)
+colnames(LineGEBLUPs) <- "geBLUP"
+LineGEBLUPs$g_alias <- c(paste0(phenoShuf$g_alias))
+#LineBLUPsMLMM <- LineBLUPsMLMM %>% arrange(genotype)
+LineGEBLUPs <- LineGEBLUPs %>% group_by(g_alias) %>% summarize(yieldGEBLUP=mean(geBLUP),na.rm=TRUE)
+PredAbilityGE <- data.frame(PredAbility))
+colnames(PredAbilityGE) <- "predictiveAbilityGE"
+
+#write.csv(LineGEBLUPs,"C:/Users/natha/OneDrive/Desktop/UH_Manoa/PhD/SideProjects/WorldVeg/WorkshopTraining/Data/Outputs/LineBLUPsGE.csv")
+#write.csv(PredAbilityGE,"C:/Users/natha/OneDrive/Desktop/UH_Manoa/PhD/SideProjects/WorldVeg/WorkshopTraining/Data/Outputs/PredAbilityGE.csv")
+
+```
+
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
